@@ -1,0 +1,16 @@
+Docket import examples
+======================
+
+Docket import example.txt   - type lists in Notepad (or copy them from another app).
+Docket import example.csv   - for lists kept in Excel or Google Sheets
+                              (File > Save as / Download > CSV).
+
+CSV columns (the header row names them, any order, only "Item" is required):
+  List      which tab it goes in (blank = named after the file)
+  Item      the item name (also accepted: Name, Task, Title)
+  Due       date: 2026-11-24, Nov 24, 11/24/2026 (month/day)
+  End       end of a date range (optional)
+  Priority  High, Med, Low
+  Remind    a time like 3:00 PM, or "yes" for the default reminder time
+  Notes     any text
+  Done      x, yes or done to bring it in ticked off

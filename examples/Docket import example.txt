@@ -1,0 +1,48 @@
+# Docket import example
+# Import it in Docket: Settings > Import a list…  or right-click a tab > Import a list…
+# Imported lists are added as new tabs. Nothing you already have is changed.
+#
+# Lines starting with # are ignored. Blank lines are fine.
+# A line starting with "## " begins a list. Without one, the list is named after the file.
+# Add [checklist] after the name for a checklist (steps only, no dates), and/or a colour:
+#   ## Map making [checklist, teal]       colours: blue teal sage olive amber peach rose plum lavender slate
+#
+# SIMPLE STYLE: write items the same way you type them in the add box.
+#   A date at the end           call mom tomorrow / plan offsite nov 24-28 / pay invoice 12/15
+#   !high !med !low anywhere    fix bug !high
+#   A time turns on a reminder  dentist fri 3pm
+#
+# COLUMN STYLE: name first, then any of these, separated by " | ", in any order:
+#   a date or range   2026-12-03 / Dec 3 / Nov 24-28 / next week
+#   a priority        High / Med / Low
+#   a reminder        remind / remind 3:00 PM
+#   notes             notes: any text
+#
+# Indent a line under an item (4 spaces or a tab) to add it to that item's notes.
+# Start a line with [x] to bring it in already ticked off. "- " bullets and "1." numbers are ignored.
+
+## Work
+Submit quarterly report today !high
+Review meeting agenda draft fri
+Plan team offsite nov 24-28 !low
+    Shortlist two venues.
+    Check the budget with finance.
+Book training course
+Dentist | Dec 3 | Med | remind 3:00 PM
+Update project tracker | Nov 30 | High | notes: Add the new milestones
+[x] Send kickoff email
+
+## Home [sage]
+Renew car insurance next week !h
+Weekend groceries sat
+    Oats, coffee, apples, rice.
+Fix closet door !low
+
+## Map making process [checklist, teal]
+Gather heightmap and reference imagery
+Import heightmap and set water level
+    Check the sea level against the reference.
+Paint terrain textures
+Place roads and rail connections
+Test play and fix issues
+Write the listing and upload
