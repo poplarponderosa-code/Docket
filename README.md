@@ -20,6 +20,37 @@ new place so startup points to the right spot.
 Your lists live in `%APPDATA%\Docket\docket.db`, separate from the app, so rebuilding or
 moving the app never touches them.
 
+## Making an installer to share Docket
+
+To give Docket to someone who doesn't use Python or GitHub, make a normal Windows installer:
+
+1. Quit Docket if it's running (tray icon > Quit Docket).
+2. Double-click `build_installer.bat`. It builds `Docket.exe`, installs **Inno Setup** (a free
+   installer maker) through winget the first time, then makes the installer. When it's done, the
+   `installer_output` folder opens with **Docket-Setup-1.0.0.exe** in it.
+3. Send that one file (through a OneDrive or Google Drive link if it's too big to email).
+
+What the person you send it to gets:
+
+* A setup wizard; it installs for them alone, with no admin password needed.
+* Docket in the Start menu, and a desktop shortcut if they tick that box.
+* "Launch Docket" at the end of setup; from then on it starts with Windows (they can turn that
+  off in Settings).
+* An uninstaller under Settings > Apps. Uninstalling keeps their lists in `%APPDATA%\Docket`,
+  so reinstalling later brings them back.
+* Windows may say "Windows protected your PC" when they open the installer, because it isn't
+  signed with a paid publisher certificate: **More info > Run anyway**.
+
+If Docket is running when they install or uninstall, setup asks to close it first.
+
+**For a new version:** change `MyAppVersion` near the top of `installer.iss` (and `__version__`
+in `docket\__init__.py`), then run `build_installer.bat` again. Installing the new one over the
+old one updates it and keeps their lists. Don't change the `AppId` line: it's how Windows
+recognises an update.
+
+To use your own name as the publisher shown in Settings > Apps, change `MyAppPublisher` in
+`installer.iss`.
+
 ## Updating to a new version
 
 There's nothing to uninstall. Docket has no installer; it's just a folder.

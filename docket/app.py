@@ -767,11 +767,17 @@ class DocketApp(QObject):
 
 
 # ---------------------------------------------------------------------------------
+_RUNNING_MUTEX = None
+
+
 def main() -> int:
+    global _RUNNING_MUTEX
     if sys.platform == "win32":
         try:
             import ctypes
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Docket.Desktop")
+            # Lets the installer and uninstaller see that Docket is running and ask to close it.
+            _RUNNING_MUTEX = ctypes.windll.kernel32.CreateMutexW(None, False, "DocketRunningMutex")
         except Exception:
             pass
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
