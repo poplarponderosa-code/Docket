@@ -174,3 +174,79 @@ def test_backup_keeps_kind_and_colour():
     s2 = Store()
     s2.replace_all(data)
     assert [(t.kind, t.color) for t in s2.tabs()] == [("checklist", "plum"), ("list", "")]
+
+
+def test_description_timer_limits_roundtrip(tmp_path):
+    s = Store()
+    t = s.add_tab("Map making", kind="checklist", color="teal")
+    s.update_tab(t.id, description="Steps for a new map.\nKeep it tidy.", timer_on=True, time_limit=10800)
+    s.add_item(t.id, "Heightmap", notes="ref imagery")
+    s.update_item(s.add_item(t.id, "Water | level").id, time_limit=1200)
+    # template keeps description, timer and limits; no ticks
+    tpl = tmp_path / "Map making.txt"
+    tpl.write_text(importer.template_text(s.tab(t.id), s.items(t.id)), encoding="utf-8")
+    loaded = importer.load_template(tpl)
+    assert loaded["description"] == "Steps for a new map.\nKeep it tidy."
+    assert loaded["timer_on"] and loaded["time_limit"] == 10800 and loaded["color"] == "teal"
+    assert [(i["name"], i["time_limit"], i["notes"]) for i in loaded["items"]] == \
+        [("Heightmap", 0, "ref imagery"), ("Water / level", 1200, "")]
+    # export and backup keep them too
+    back = importer.parse_text(importer.export_list(s.tab(t.id), s.items(t.id)), "x", FRI)[0]
+    assert back["description"].startswith("Steps") and back["items"][1]["time_limit"] == 1200
+    data = backup.parse(backup.render(s))
+    assert data[0]["description"] == "Steps for a new map.\nKeep it tidy." and data[0]["timer_on"]
+    assert data[0]["items"][1]["time_limit"] == 1200
+    s2 = Store()
+    s2.replace_all(data)
+    t2 = s2.tabs()[0]
+    assert t2.description.startswith("Steps") and t2.timer_on and t2.time_limit == 10800
+    assert s2.items(t2.id)[1].time_limit == 1200
+
+
+def test_example_checklist_has_timer_and_limits():
+    tabs = importer.parse_text(importer.TEMPLATE_TXT, "x", FRI)
+    mm = tabs[2]
+    assert mm["timer_on"] and mm["description"] == "Steps for a new map, start to finish."
+    assert [i["time_limit"] for i in mm["items"]][:3] == [1800, 1200, 3600]
+    assert mm["categories"] == ["Research", "Terrain", "Roads", "Publishing"]
+    assert [i["category"] for i in mm["items"]] == ["Research", "Terrain", "Terrain", "Roads", "", "Publishing"]
+
+
+def test_categories_roundtrip_and_rename_delete():
+    s = Store()
+    t = s.add_tab("Map", kind="checklist")
+    s.set_categories(t.id, ["Terrain", "Roads", "Terrain", " "])
+    assert s.tab(t.id).category_list == ["Terrain", "Roads"]
+    a = s.add_item(t.id, "Paint")
+    b = s.add_item(t.id, "Highways")
+    s.update_item(a.id, category="Terrain")
+    s.update_item(b.id, category="Roads")
+    for text in (importer.template_text(s.tab(t.id), s.items(t.id)),
+                 importer.export_list(s.tab(t.id), s.items(t.id)), backup.render(s)):
+        back = (importer.parse_text(text, "x", FRI) or backup.parse(text))[0]
+        assert back["categories"] == ["Terrain", "Roads"], text
+        assert [i["category"] for i in back["items"]] == ["Terrain", "Roads"]
+    s2 = Store()
+    s2.replace_all(backup.parse(backup.render(s)))
+    t2 = s2.tabs()[0]
+    assert t2.category_list == ["Terrain", "Roads"] and t2.show_category
+    # rename Terrain -> Land, drop Roads: steps follow
+    s.set_categories(t.id, ["Land"], renamed={"Terrain": "Land"})
+    assert [i.category for i in s.items(t.id)] == ["Land", ""]
+    # a step's category that isn't in the list gets added on import
+    data = importer.parse_text("## X [checklist]\nStep | category Extra\n", "x", FRI)
+    s3 = Store()
+    s3.add_lists(data)
+    assert s3.tabs()[0].category_list == ["Extra"]
+
+
+def test_clear_checked_items():
+    s = Store()
+    t = s.add_tab("List")
+    a = s.add_item(t.id, "a")
+    b = s.add_item(t.id, "b", done=True)
+    s.add_item(t.id, "c", done=True)
+    s.update_tab(t.id, current_item=b.id)
+    assert s.delete_done(t.id) == 2
+    assert [i.name for i in s.items(t.id)] == ["a"] and s.tab(t.id).current_item == 0
+    assert s.delete_done(t.id) == 0 and s.item(a.id) is not None

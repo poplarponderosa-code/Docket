@@ -11,7 +11,8 @@ import io
 import re
 from pathlib import Path
 
-from .backup import format_header, parse_header
+from .backup import description_lines, format_header, parse_categories, parse_header
+from .timer import fmt_limit, parse_duration
 from .parser import PRIORITY_WORDS, parse_date_expr, parse_quick_add, parse_single, parse_time
 from .store import PRIORITIES, Item, Tab
 
@@ -22,7 +23,7 @@ TRUE_WORDS = {"x", "yes", "y", "true", "1", "done", "✓", "complete", "complete
 
 def _new_item(name: str = "") -> dict:
     return {"name": name, "due": "", "end": "", "priority": 1, "notes": "",
-            "reminder": False, "remind_time": "", "done": False}
+            "reminder": False, "remind_time": "", "done": False, "time_limit": 0, "category": ""}
 
 
 def _priority(word: str) -> int | None:
@@ -69,6 +70,10 @@ def parse_line(line: str, today: dt.date, checklist: bool = False) -> dict | Non
                 continue
             if low.startswith("due:"):
                 _set_dates(item, field[4:], today)
+            elif low.startswith("limit"):
+                item["time_limit"] = parse_duration(field[5:].lstrip(":").strip()) or 0
+            elif low.startswith("category"):
+                item["category"] = field[8:].lstrip(":").strip()
             elif low.startswith("priority:"):
                 pri = _priority(field[9:])
                 if pri is not None:
@@ -121,6 +126,16 @@ def parse_text(text: str, default_name: str, today: dt.date | None = None) -> li
             tabs.append(current)
             last = None
             continue
+        cats = parse_categories(line)
+        if cats is not None:
+            if current is not None:
+                current["categories"] = cats
+            continue
+        if line.startswith("> ") or line == ">":
+            if current is not None and not current["items"]:
+                current["description"] = ((current.get("description") or "") + "\n" if current.get("description")
+                                          else "") + line[2:]
+            continue
         if line.lstrip().startswith("#"):
             continue
         if (raw.startswith("    ") or raw.startswith("\t")) and last is not None:
@@ -128,7 +143,7 @@ def parse_text(text: str, default_name: str, today: dt.date | None = None) -> li
             last["notes"] = (last["notes"] + "\n" if last["notes"] else "") + note.rstrip()
             continue
         if current is None:
-            current = {"name": default_name, "kind": "list", "color": "", "items": []}
+            current = {"name": default_name, "kind": "list", "color": "", "description": "", "items": []}
             tabs.append(current)
         item = parse_line(line, today, checklist=current.get("kind") == "checklist")
         if item is None:
@@ -226,7 +241,7 @@ def export_list(tab: Tab, items: list[Item]) -> str:
     """One list in the import format, so it can be imported again (here or on another PC)."""
     lines = [f"# Docket list export: {tab.name}",
              f"# Saved {dt.datetime.now():%Y-%m-%d %H:%M}. Import it with Settings > Import a list…",
-             "", format_header(tab)]
+             "", format_header(tab)] + description_lines(tab)
     for it in items:
         parts = [("[x] " if it.done else "") + it.name.replace("|", "/")]
         if tab.kind != "checklist" or it.due:
@@ -235,6 +250,10 @@ def export_list(tab: Tab, items: list[Item]) -> str:
             parts.append(PRIORITIES[it.priority])
             if it.reminder:
                 parts.append("remind" + (f" {it.remind_time}" if it.remind_time else ""))
+        if it.time_limit:
+            parts.append(f"limit {fmt_limit(it.time_limit)}")
+        if it.category:
+            parts.append(f"category {it.category.replace('|', '/')}")
         lines.append(" | ".join(parts) if len(parts) > 1 else parts[0])
         for note in it.notes.splitlines():
             lines.append("    " + note)
@@ -246,9 +265,16 @@ def template_text(tab: Tab, items: list[Item]) -> str:
     lines = [f"# Docket checklist template: {tab.name}",
              "# Start a new checklist from it with + > New from template,",
              "# or send this file to someone and they can do the same.",
-             "", format_header(Tab(0, tab.name, kind="checklist", color=tab.color))]
+             "", format_header(Tab(0, tab.name, kind="checklist", color=tab.color, timer_on=tab.timer_on,
+                                   time_limit=tab.time_limit))]
+    lines += description_lines(tab)
     for it in items:
-        lines.append(it.name)
+        parts = [it.name.replace("|", "/")]
+        if it.time_limit:
+            parts.append(f"limit {fmt_limit(it.time_limit)}")
+        if it.category:
+            parts.append(f"category {it.category.replace('|', '/')}")
+        lines.append(" | ".join(parts))
         for note in it.notes.splitlines():
             lines.append("    " + note)
     return "\n".join(lines) + "\n"
@@ -287,6 +313,11 @@ TEMPLATE_TXT = """\
 # A line starting with "## " begins a list. Without one, the list is named after the file.
 # Add [checklist] after the name for a checklist (steps only, no dates), and/or a colour:
 #   ## Map making [checklist, teal]       colours: blue teal sage olive amber peach rose plum lavender slate
+# For a checklist with its timer on, add "timer" and/or a total time: [checklist, teal, timer, limit 3h]
+# Lines starting with "> " right under the name line are the list's description.
+# A step's time limit goes after a " | ": Paint terrain | limit 45m
+# Checklist categories: a line "@categories: Terrain; Roads; Assets" under the name line,
+#   and a step's category after a " | ": Paint terrain | limit 45m | category Terrain
 #
 # SIMPLE STYLE: write items the same way you type them in the add box.
 #   A date at the end           call mom tomorrow / plan offsite nov 24-28 / pay invoice 12/15
@@ -319,14 +350,16 @@ Weekend groceries sat
     Oats, coffee, apples, rice.
 Fix closet door !low
 
-## Map making process [checklist, teal]
-Gather heightmap and reference imagery
-Import heightmap and set water level
+## Map making process [checklist, teal, timer]
+@categories: Research; Terrain; Roads; Publishing
+> Steps for a new map, start to finish.
+Gather heightmap and reference imagery | limit 30m | category Research
+Import heightmap and set water level | limit 20m | category Terrain
     Check the sea level against the reference.
-Paint terrain textures
-Place roads and rail connections
+Paint terrain textures | limit 1h | category Terrain
+Place roads and rail connections | category Roads
 Test play and fix issues
-Write the listing and upload
+Write the listing and upload | category Publishing
 """
 
 TEMPLATE_CSV = """\

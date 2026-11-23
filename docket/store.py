@@ -42,7 +42,15 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 """
 
-ITEM_FIELDS = {"name", "due", "end", "priority", "notes", "reminder", "reminded", "remind_time", "done", "tab_id"}
+# Columns added in 1.1 (descriptions and the checklist timer). Added to older databases on start.
+TAB_EXTRA = [('description', "TEXT NOT NULL DEFAULT ''"), ('timer_on', 'INTEGER NOT NULL DEFAULT 0'), ('time_limit', 'INTEGER NOT NULL DEFAULT 0'), ('timer_running', 'INTEGER NOT NULL DEFAULT 0'), ('timer_started', "TEXT NOT NULL DEFAULT ''"), ('timer_finished', "TEXT NOT NULL DEFAULT ''"), ('current_item', 'INTEGER NOT NULL DEFAULT 0'), ('heartbeat', "TEXT NOT NULL DEFAULT ''"), ('alerted', 'INTEGER NOT NULL DEFAULT 0'), ('categories', "TEXT NOT NULL DEFAULT ''"), ('show_category', 'INTEGER NOT NULL DEFAULT 0')]
+ITEM_EXTRA = [('elapsed', 'REAL NOT NULL DEFAULT 0'), ('run_from', "TEXT NOT NULL DEFAULT ''"), ('started', "TEXT NOT NULL DEFAULT ''"), ('finished', "TEXT NOT NULL DEFAULT ''"), ('time_limit', 'INTEGER NOT NULL DEFAULT 0'), ('alerted', 'INTEGER NOT NULL DEFAULT 0'), ('category', "TEXT NOT NULL DEFAULT ''")]
+TAB_FIELDS = {"name", "kind", "color", "description", "timer_on", "time_limit", "timer_running",
+              "timer_started", "timer_finished", "current_item", "heartbeat", "alerted", "categories",
+              "show_category"}
+
+ITEM_FIELDS = {"name", "due", "end", "priority", "notes", "reminder", "reminded", "remind_time", "done", "tab_id",
+               "elapsed", "run_from", "started", "finished", "time_limit", "alerted", "category"}
 
 
 @dataclass
@@ -55,6 +63,25 @@ class Tab:
     kind: str = "list"      # "list" (dates & priority) or "checklist"
     color: str = ""         # a key from themes.LIST_COLORS, or "" for the theme accent
     collapsed: bool = False # shown as a pill (pop-out windows)
+    description: str = ""
+    timer_on: bool = False   # checklist timer switched on (shows the Time column)
+    time_limit: int = 0      # seconds for the whole checklist, 0 = none
+    timer_running: bool = False
+    timer_started: str = ""  # ISO date-time the checklist's timer first started
+    timer_finished: str = ""
+    current_item: int = 0    # step chosen with its ▶ (0 = the top unticked step)
+    heartbeat: str = ""      # last time the running timer was seen alive
+    alerted: bool = False    # whole-checklist time-up alert already shown
+    categories: str = ""     # this checklist's categories, as a JSON list of names
+    show_category: bool = False  # Category column shown
+
+    @property
+    def category_list(self) -> list[str]:
+        try:
+            value = json.loads(self.categories) if self.categories else []
+        except ValueError:
+            return []
+        return [str(c) for c in value if str(c).strip()]
 
     @property
     def is_checklist(self) -> bool:
@@ -76,6 +103,13 @@ class Item:
     created: str = ""
     remind_time: str = ""   # "HH:MM", or "" to use the default from Settings
     position: int = 0       # manual order (used by checklists)
+    elapsed: float = 0.0     # seconds recorded, not counting a run in progress
+    run_from: str = ""       # ISO date-time the current run began ("" = not running)
+    started: str = ""        # first started
+    finished: str = ""       # ticked off
+    time_limit: int = 0      # seconds, 0 = none
+    alerted: bool = False    # time-up alert already shown
+    category: str = ""       # one of its checklist's categories, or ""
 
 
 class Store:
@@ -110,6 +144,13 @@ class Store:
             self.db.execute("ALTER TABLE tabs ADD COLUMN color TEXT NOT NULL DEFAULT ''")
         if "collapsed" not in tcols:
             self.db.execute("ALTER TABLE tabs ADD COLUMN collapsed INTEGER NOT NULL DEFAULT 0")
+        for name, decl in TAB_EXTRA:
+            if name not in tcols:
+                self.db.execute(f"ALTER TABLE tabs ADD COLUMN {name} {decl}")
+        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(items)")}
+        for name, decl in ITEM_EXTRA:
+            if name not in cols:
+                self.db.execute(f"ALTER TABLE items ADD COLUMN {name} {decl}")
 
     def close(self) -> None:
         self.db.commit()
@@ -135,7 +176,10 @@ class Store:
     @staticmethod
     def _tab(row: sqlite3.Row) -> Tab:
         return Tab(row["id"], row["name"], row["position"], bool(row["popped"]), row["geometry"],
-                   row["kind"] or "list", row["color"] or "", bool(row["collapsed"]))
+                   row["kind"] or "list", row["color"] or "", bool(row["collapsed"]),
+                   row["description"], bool(row["timer_on"]), row["time_limit"], bool(row["timer_running"]),
+                   row["timer_started"], row["timer_finished"], row["current_item"], row["heartbeat"],
+                   bool(row["alerted"]), row["categories"], bool(row["show_category"]))
 
     def tabs(self) -> list[Tab]:
         return [self._tab(r) for r in self.db.execute("SELECT * FROM tabs ORDER BY position, id")]
@@ -149,12 +193,54 @@ class Store:
         self._emit(None)
         return self.tab(tab_id)
 
-    def _insert_tab(self, name: str, kind: str = "list", color: str = "") -> int:
+    def _insert_tab(self, name: str, kind: str = "list", color: str = "", description: str = "",
+                    timer_on: bool = False, time_limit: int = 0, categories: list[str] | None = None,
+                    show_category: bool = False) -> int:
         pos = self.db.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM tabs").fetchone()[0]
         kind = kind if kind in ("list", "checklist") else "list"
-        cur = self.db.execute("INSERT INTO tabs (name, position, kind, color) VALUES (?, ?, ?, ?)",
-                              (name or "List", pos, kind, color or ""))
+        cats = json.dumps(list(categories)) if categories else ""
+        cur = self.db.execute("INSERT INTO tabs (name, position, kind, color, description, timer_on, time_limit,"
+                              " categories, show_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                              (name or "List", pos, kind, color or "", description or "", int(bool(timer_on)),
+                               int(time_limit or 0), cats, int(bool(show_category))))
         return cur.lastrowid
+
+    def _insert_tab_dict(self, tab: dict, default_name: str) -> int:
+        cats = list(tab.get("categories") or [])
+        for it in tab.get("items", []):           # a category used by a step is always in the list
+            c = (it.get("category") or "").strip()
+            if c and c not in cats:
+                cats.append(c)
+        return self._insert_tab(tab.get("name") or default_name, tab.get("kind", "list"), tab.get("color", ""),
+                                tab.get("description", ""), tab.get("timer_on", False), tab.get("time_limit", 0),
+                                cats, tab.get("show_category", bool(cats)))
+
+    def set_categories(self, tab_id: int, names: list[str], renamed: dict[str, str] | None = None) -> None:
+        """Save a checklist's categories; steps using a renamed or removed category follow along."""
+        clean: list[str] = []
+        for n in names:
+            n = n.strip()
+            if n and n not in clean:
+                clean.append(n)
+        for old, new in (renamed or {}).items():
+            self.db.execute("UPDATE items SET category = ? WHERE tab_id = ? AND category = ?", (new, tab_id, old))
+        if clean:
+            marks = ",".join("?" * len(clean))
+            self.db.execute(f"UPDATE items SET category = '' WHERE tab_id = ? AND category != '' "
+                            f"AND category NOT IN ({marks})", (tab_id, *clean))
+        else:
+            self.db.execute("UPDATE items SET category = '' WHERE tab_id = ?", (tab_id,))
+        self.db.execute("UPDATE tabs SET categories = ? WHERE id = ?", (json.dumps(clean) if clean else "", tab_id))
+        self._emit(tab_id)
+
+    def delete_done(self, tab_id: int) -> int:
+        """Clear checked items: delete every ticked item in a list. Returns how many."""
+        cur = self.db.execute("DELETE FROM items WHERE tab_id = ? AND done = 1", (tab_id,))
+        tab = self.tab(tab_id)
+        if tab is not None and tab.current_item and self.item(tab.current_item) is None:
+            self.db.execute("UPDATE tabs SET current_item = 0 WHERE id = ?", (tab_id,))
+        self._emit(tab_id)
+        return cur.rowcount
 
     def set_tab_kind(self, tab_id: int, kind: str) -> None:
         self.db.execute("UPDATE tabs SET kind = ? WHERE id = ?", (kind, tab_id))
@@ -163,6 +249,18 @@ class Store:
     def set_tab_color(self, tab_id: int, color: str) -> None:
         self.db.execute("UPDATE tabs SET color = ? WHERE id = ?", (color, tab_id))
         self._emit(None, dirty=False)
+
+    def update_tab(self, tab_id: int, quiet: bool = False, dirty: bool = True, **fields: Any) -> Tab | None:
+        unknown = set(fields) - TAB_FIELDS
+        if unknown:
+            raise ValueError(f"unknown tab fields: {unknown}")
+        if not fields:
+            return self.tab(tab_id)
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        vals = [int(v) if isinstance(v, bool) else v for v in fields.values()]
+        self.db.execute(f"UPDATE tabs SET {cols} WHERE id = ?", (*vals, tab_id))
+        self._emit(None if {"name", "kind", "color"} & set(fields) else tab_id, quiet=quiet, dirty=dirty)
+        return self.tab(tab_id)
 
     def set_tab_collapsed(self, tab_id: int, collapsed: bool) -> None:
         self.db.execute("UPDATE tabs SET collapsed = ? WHERE id = ?", (int(collapsed), tab_id))
@@ -195,7 +293,8 @@ class Store:
     def _item(r: sqlite3.Row) -> Item:
         return Item(r["id"], r["tab_id"], r["name"], r["due"], r["end_date"], r["priority"],
                     r["notes"], bool(r["reminder"]), bool(r["reminded"]), bool(r["done"]), r["created"],
-                    r["remind_time"], r["position"])
+                    r["remind_time"], r["position"], r["elapsed"], r["run_from"], r["started"],
+                    r["finished"], r["time_limit"], bool(r["alerted"]), r["category"])
 
     def items(self, tab_id: int) -> list[Item]:
         rows = self.db.execute("SELECT * FROM items WHERE tab_id = ? ORDER BY position, id", (tab_id,))
@@ -224,10 +323,11 @@ class Store:
                               (tab_id,)).fetchone()[0]
         cur = self.db.execute(
             "INSERT INTO items (tab_id, name, due, end_date, priority, notes, reminder, remind_time, done, created,"
-            " position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " position, time_limit, category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (tab_id, it.get("name", ""), due, end, int(it.get("priority", 1)), it.get("notes", "") or "",
              int(bool(it.get("reminder"))), it.get("remind_time", "") or "", int(bool(it.get("done"))),
-             dt.datetime.now().isoformat(timespec="seconds"), pos))
+             dt.datetime.now().isoformat(timespec="seconds"), pos, int(it.get("time_limit", 0) or 0),
+             it.get("category", "") or ""))
         return cur.lastrowid
 
     def move_item(self, item_id: int, before_id: int | None) -> None:
@@ -301,7 +401,7 @@ class Store:
         self.db.execute("DELETE FROM items")
         self.db.execute("DELETE FROM tabs")
         for tab in data:
-            tab_id = self._insert_tab(tab.get("name") or "List", tab.get("kind", "list"), tab.get("color", ""))
+            tab_id = self._insert_tab_dict(tab, "List")
             for it in tab.get("items", []):
                 self._insert_item(tab_id, it)
         self._emit(None)
@@ -310,7 +410,7 @@ class Store:
         """Add imported lists as new tabs after the existing ones."""
         made = []
         for tab in data:
-            tab_id = self._insert_tab(tab.get("name") or "Imported", tab.get("kind", "list"), tab.get("color", ""))
+            tab_id = self._insert_tab_dict(tab, "Imported")
             for it in tab.get("items", []):
                 self._insert_item(tab_id, it)
             made.append(tab_id)

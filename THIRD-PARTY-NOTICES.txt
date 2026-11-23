@@ -1,0 +1,27 @@
+Docket - third-party notices
+============================
+
+Docket is made with these open-source components. Thank you to their authors.
+
+Qt for Python (PySide6) and the Qt libraries
+  Copyright (C) The Qt Company Ltd. and other contributors.
+  Used under the GNU Lesser General Public License, version 3 (LGPLv3).
+  Docket uses the Qt libraries unchanged, as separate files in its install folder,
+  so they can be replaced with other compatible builds.
+  Licence text: https://www.gnu.org/licenses/lgpl-3.0.html
+  Source code:  https://code.qt.io  and  https://download.qt.io/official_releases/QtForPython/
+
+Python
+  Copyright (C) Python Software Foundation.
+  Python Software Foundation License: https://docs.python.org/3/license.html
+
+PyInstaller (bootloader used to start Docket.exe)
+  Copyright (C) PyInstaller Development Team.
+  GPL 2.0 with an exception that allows distributing applications built with it.
+  https://github.com/pyinstaller/pyinstaller/blob/develop/COPYING.txt
+
+Inno Setup (used to build the installer)
+  Copyright (C) Jordan Russell and Martijn Laan. https://jrsoftware.org/files/is/license.txt
+
+Docket itself: see LICENSE in the source repository,
+https://github.com/poplarponderosa-code/Docket

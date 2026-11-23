@@ -149,6 +149,18 @@ QToolButton[swatch="true"]:checked {{ border-color: {p['accent']}; color: {p['te
 #FieldLabel {{ color: {p['muted']}; font-size: 11px; }}
 #HeaderLabel {{ color: {p['muted']}; font-size: 10px; font-weight: 600; }}
 #DropLine {{ background: {p['accent']}; border-radius: 1px; }}
+#TimeCell, #TotalBtn {{ color: {p['muted']}; font-size: 12px; }}
+#TotalBtn {{ background: transparent; border: 0; padding: 0; text-align: right; font-weight: 600; }}
+#TimeCell[status="running"], #TotalBtn[status="running"] {{ color: {p['accent']}; font-weight: 600; }}
+#TimeCell[status="over"], #TotalBtn[status="over"] {{ color: {p['warn']}; font-weight: 600; }}
+#TimeCell[status="done"] {{ color: {p['muted']}; }}
+#InfoBox {{ background: {p['accentSoft']}; border-radius: 8px; }}
+#CategoryCell {{ color: {p['muted']}; font-size: 12px; }}
+QToolButton#LogoBtn {{ background: transparent; border: 0; border-radius: 6px; padding: 3px; }}
+QToolButton#LogoBtn:hover {{ background: {p['hover']}; }}
+QToolButton#LogoBtn::menu-indicator {{ image: none; width: 0px; }}
+#InfoBox QLabel {{ color: {p['text']}; font-size: 12px; }}
+QKeySequenceEdit QLineEdit {{ background: {p['win']}; }}
 QToolButton[iconBtn="true"]::menu-button {{ border: 0; width: 12px; }}
 QToolButton[iconBtn="true"]::menu-arrow {{ width: 8px; height: 8px; }}
 

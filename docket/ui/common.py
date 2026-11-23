@@ -185,6 +185,9 @@ class TitleBar(QWidget):
 
     def mousePressEvent(self, e: QMouseEvent) -> None:
         super().mousePressEvent(e)
+        win = self.window()
+        if hasattr(win, "stop_pulse"):
+            win.stop_pulse()
         if e.button() == Qt.MouseButton.LeftButton:
             self._press = e.position().toPoint()
             e.accept()   # keep the following move events coming here
@@ -192,7 +195,11 @@ class TitleBar(QWidget):
     def mouseMoveEvent(self, e: QMouseEvent) -> None:
         gpos = e.globalPosition().toPoint()
         if self._dragging:
-            self.window().move(gpos - self._offset)
+            win = self.window()
+            if hasattr(win, "drag_to"):
+                win.drag_to(gpos - self._offset)
+            else:
+                win.move(gpos - self._offset)
             self.drag_moved.emit(gpos)
             e.accept()
             return

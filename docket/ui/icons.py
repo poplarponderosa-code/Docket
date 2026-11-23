@@ -14,6 +14,12 @@ PATHS = {
     "sliders": '<path d="M2.5 5h6M11.5 5h2M2.5 11h2M7.5 11h6"/><circle cx="10" cy="5" r="1.5"/><circle cx="6" cy="11" r="1.5"/>',
     "pin": '<path d="M6 2.5h4l-.5 4 2 2v1h-7v-1l2-2z"/><path d="M8 9.5v4"/>',
     "pin_fill": '<path d="M6 2.5h4l-.5 4 2 2v1h-7v-1l2-2z" fill="currentFill"/><path d="M8 9.5v4"/>',
+    "play": '<path d="M5.5 3.5v9l7-4.5z" fill="currentFill"/>',
+    "pause": '<path d="M5.5 3.5v9M10.5 3.5v9" stroke-width="2.2"/>',
+    "info": '<circle cx="8" cy="8" r="6"/><path d="M8 7.3v3.9M8 5v.2"/>',
+    "stopwatch": '<circle cx="8" cy="9" r="5"/><path d="M8 9V6.5M6.5 2.5h3M12.2 4.8l.9-.9"/>',
+    "ledger": '<path d="M4 2.5h5.5L12 5v8.5H4z"/><path d="M9.5 2.5V5H12M6 8h4M6 10.5h4"/>',
+    "tag": '<path d="M2.5 8.2V3h5.2l5.8 5.8-5.2 5.2z"/><circle cx="5.3" cy="5.8" r=".9"/>',
     "grip": '<circle cx="6" cy="4" r=".9"/><circle cx="10" cy="4" r=".9"/><circle cx="6" cy="8" r=".9"/>'
             '<circle cx="10" cy="8" r=".9"/><circle cx="6" cy="12" r=".9"/><circle cx="10" cy="12" r=".9"/>',
     "moon": '<path d="M12.5 9.5A5 5 0 0 1 6.5 3.5a5 5 0 1 0 6 6z"/>',

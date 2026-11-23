@@ -20,6 +20,7 @@ from pathlib import Path
 
 from .store import PRIORITIES, Store, Tab
 from .themes import LIST_COLORS
+from .timer import fmt_limit, parse_duration
 
 PREFIX = "Docket backup "
 ITEM_RE = re.compile(r"^- \[( |x|X)\] (.*)$")
@@ -33,23 +34,50 @@ def format_header(tab: Tab) -> str:
         attrs.append("checklist")
     if tab.color in LIST_COLORS:
         attrs.append(tab.color)
+    if tab.timer_on:
+        attrs.append("timer")
+    if tab.time_limit:
+        attrs.append(f"limit {fmt_limit(tab.time_limit)}")
     return f"## {tab.name}" + (f" [{', '.join(attrs)}]" if attrs else "")
+
+
+def description_lines(tab: Tab) -> list[str]:
+    """Under a list's name line: its categories ('@categories: A; B') and description ('> ' lines)."""
+    lines = []
+    if tab.category_list:
+        lines.append("@categories: " + "; ".join(c.replace(";", ",") for c in tab.category_list))
+    if tab.description.strip():
+        lines += [f"> {line}" for line in tab.description.splitlines()]
+    return lines
+
+
+def parse_categories(line: str) -> list[str] | None:
+    """'@categories: Terrain; Roads' -> ['Terrain', 'Roads'] (None if the line isn't one)."""
+    if not line.lower().startswith("@categories"):
+        return None
+    body = line.split(":", 1)[1] if ":" in line else line[len("@categories"):]
+    return [c.strip() for c in body.split(";") if c.strip()]
 
 
 def parse_header(line: str) -> dict | None:
     m = HEADER_RE.match(line.rstrip())
     if not m:
         return None
-    name, kind, color = m.group(1).strip(), "list", ""
+    name, kind, color, timer_on, limit = m.group(1).strip(), "list", "", False, 0
     for word in (m.group(2) or "").split(","):
         w = word.strip().lower()
         if w in ("checklist", "check list"):
             kind = "checklist"
         elif w in LIST_COLORS:
             color = w
+        elif w == "timer":
+            timer_on = True
+        elif w.startswith("limit"):
+            limit = parse_duration(w[5:]) or 0
     if m.group(2) is not None and not name:
         name = m.group(2)
-    return {"name": name or "List", "kind": kind, "color": color, "items": []}
+    return {"name": name or "List", "kind": kind, "color": color, "description": "",
+            "timer_on": timer_on or bool(limit), "time_limit": limit, "categories": [], "items": []}
 
 
 def render(store: Store, now: dt.datetime | None = None) -> str:
@@ -60,6 +88,7 @@ def render(store: Store, now: dt.datetime | None = None) -> str:
              ""]
     for tab, items in store.snapshot():
         lines.append(format_header(tab))
+        lines += description_lines(tab)
         for it in items:
             fields = [f"- [{'x' if it.done else ' '}] {it.name}"]
             if it.due:
@@ -67,6 +96,10 @@ def render(store: Store, now: dt.datetime | None = None) -> str:
             fields.append(f"priority: {PRIORITIES[it.priority]}")
             if it.reminder:
                 fields.append("remind" + (f" {it.remind_time}" if it.remind_time else ""))
+            if it.time_limit:
+                fields.append(f"limit: {fmt_limit(it.time_limit)}")
+            if it.category:
+                fields.append(f"category: {it.category.replace('|', '/')}")
             lines.append(" | ".join(fields))
             for note_line in it.notes.splitlines():
                 lines.append("    " + note_line)
@@ -108,6 +141,10 @@ def parse(text: str) -> list[dict]:
                 elif low.startswith("priority:"):
                     word = p[9:].strip().capitalize()
                     item["priority"] = PRIORITIES.index(word) if word in PRIORITIES else 1
+                elif low.startswith("limit:"):
+                    item["time_limit"] = parse_duration(p[6:]) or 0
+                elif low.startswith("category:"):
+                    item["category"] = p[9:].strip()
                 elif low == "remind" or low.startswith("remind "):
                     item["reminder"] = True
                     t = p[6:].strip()
@@ -119,6 +156,15 @@ def parse(text: str) -> list[dict]:
             item["name"] = " | ".join(parts).strip()
             current["items"].append(item)
             last = item
+            continue
+        cats = parse_categories(raw)
+        if cats is not None:
+            if current is not None:
+                current["categories"] = cats
+            continue
+        if raw.startswith("> ") or raw == ">":
+            if current is not None and not current["items"]:
+                current["description"] = (current["description"] + "\n" if current["description"] else "") + raw[2:]
             continue
         if raw.startswith("    ") and last is not None:
             last["notes"] = (last["notes"] + "\n" if last["notes"] else "") + raw[4:]

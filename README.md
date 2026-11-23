@@ -20,6 +20,30 @@ new place so startup points to the right spot.
 Your lists live in `%APPDATA%\Docket\docket.db`, separate from the app, so rebuilding or
 moving the app never touches them.
 
+## Keyboard shortcuts and Stream Deck
+
+Three shortcuts work from any program, set in Settings > Keyboard shortcuts:
+
+| Action | Default |
+|---|---|
+| Show or hide Docket | F13 |
+| Tick the top item on the active list | F14 |
+| Start or pause the timer | F15 |
+
+F13–F15 aren't on most keyboards, so they can't clash with other programs' shortcuts, but a
+Stream Deck can send them. To set up a Stream Deck: drag a **Hotkey** action (System) onto a key and
+set its hotkey to the shortcut; repeat for the other two. If you'd rather use your keyboard, pick any
+other combination in Settings; it tells you if another program already uses it. "Active list" means
+the checklist whose timer is running, otherwise the list you used last.
+
+## Updates
+
+Docket checks GitHub once a day for a newer release (Settings > About & updates, where you can also
+check now or turn it off). When there is one it shows what's new and offers **Update now**, **Later**
+or **Skip this version**. Update now downloads the installer from the GitHub release, closes Docket,
+installs quietly and reopens it, keeping your lists. Publishing a new release on GitHub, with the
+setup `.exe` attached, is what makes an update appear.
+
 ## Making an installer to share Docket
 
 To give Docket to someone who doesn't use Python or GitHub, make a normal Windows installer:
@@ -44,7 +68,8 @@ What the person you send it to gets:
 If Docket is running when they install or uninstall, setup asks to close it first.
 
 **For a new version:** change `MyAppVersion` near the top of `installer.iss` (and `__version__`
-in `docket\__init__.py`), then run `build_installer.bat` again. Installing the new one over the
+in `docket\__init__.py`), then run `build_installer.bat` again. Attach the new setup file to a new
+GitHub release (tag `v` plus the version, like `v1.2.0`) so the in-app updater finds it. Installing the new one over the
 old one updates it and keeps their lists. Don't change the `AppId` line: it's how Windows
 recognises an update.
 
@@ -125,12 +150,21 @@ picked up for you, and the grey line under the box shows what it understood befo
   it to fit the whole item, and again to go back to your width. The pill's buttons (pin, open,
   close) only appear while the mouse is over it. A pill has its own pin, separate from the full
   window's. Double-click the title or click an item line to open the full window again.
+* **Pill height:** drag a pill's bottom edge and it snaps to show 1, 2 or 3 items (3 at most). The
+  default for new pills is in Settings.
+* **Pills snap** to each other, the main window and the screen edges as you drag them, on any side.
+  Turn snapping off in Settings.
 * **Docket remembers your layout:** which lists are in their own windows, where they are, which
   windows are pills, and which tab was open all come back the next time it starts.
 * **Resizing:** drag any edge or corner of a window. **Double-click the resize corner** (bottom
   right) to fit the window to every item in the list, full names included.
-* **Close (×)** hides Docket to the system tray; it keeps running for reminders.
+* **Docket lives in the system tray, with no taskbar button.** Close (×) and minimize (–) both hide it
+  there; it keeps running for reminders and timers.
   Click the tray icon to bring it back, right-click it for Quick add, Back up now, Settings, Quit.
+* **The D logo** (top left) opens Docket's menu: companion apps (**Open Ledger**, or **Get Ledger…** if
+  it isn't installed), Open time logs folder, Settings, Check for updates and Quit.
+* **Clear done** in the footer (or right-click a tab > Clear checked items…) deletes every ticked item
+  in that list, after asking. Your backups still have them.
 * The **pin** keeps windows on top; it fills in while it's on. The **moon/sun** flips dark mode.
 
 ## Checklists
@@ -146,6 +180,38 @@ For processes you repeat, like making a map. A checklist has steps instead of da
   after asking first.
 * Any list can switch between a priority list and a checklist (right-click its tab). Dates and
   priorities are hidden in checklist view, never deleted, so switching back brings them back.
+
+**Timer (optional):** right-click a checklist's tab > **Use a timer**. A Time column appears.
+
+* Press **▶** in the header (or on the pill) to start. Time always runs on the top unticked step.
+  Tick it and its time is saved and the next step starts at once. Ticking the last step stops the
+  timer and saves a **time log**.
+* Hover a step to see its own ▶: it moves the timer onto that step (or pauses it if it's running).
+* **Time limits are optional.** Open a step and type a limit (`15m`, `1h30`, `1:30`, `90s`); click the
+  total in the header for a limit on the whole checklist. With a limit the step counts down, and at
+  zero you hear a soft sound and the pill or title bar gently flashes for a few seconds (click to
+  stop it). It keeps counting as overtime (`+2:15`).
+* Lock the PC or put it to sleep and the timer pauses; when you're back, Docket asks whether to
+  resume. If Docket was closed with a timer running, it asks the same when it starts.
+* Only one checklist's timer runs at a time.
+* **Time logs** are a text file (and a CSV copy for Excel or Google Sheets) with the checklist's name,
+  description, start and finish, and each step's start, end, duration and limit. They go to
+  `Time logs` inside your backup folder (change it in Settings). Right-click the tab > **Export time
+  log…** saves one at any point. **Reset** clears the times as well as the ticks, after asking.
+
+**Categories (optional):** open a step and pick a **Category**, or choose **New category…** to make
+one. Each checklist has its own categories (edit, rename or remove them with **Edit categories…**, or
+right-click the tab > Categories…), and templates keep them. Right-click the column headings to show
+or hide the **Category** column. Time logs list each step's category and add up time per category.
+
+**Ledger:** Docket Ledger is the companion app that turns time logs into PDF timesheets. When a timed
+checklist is finished, a small Ledger icon appears beside its timer (and on its pill) until you reset
+it; click it, or right-click the tab > **Make a PDF in Ledger…**, to open that checklist's newest time
+log in Ledger. If Ledger isn't installed, these open its download page. Ledger finds Docket's time
+logs folder on its own.
+
+**Description:** every list has an **ⓘ** at the right of its column headings. Click it to write a
+description; it's kept with exports, templates, backups and time logs.
 
 **Templates:** right-click a checklist's tab > **Save as template…** saves a clean copy (every
 step unticked, notes kept) to your templates folder. Start a fresh one with the arrow beside
@@ -221,8 +287,18 @@ docket/
   store.py      SQLite storage
   backup.py     text backup write / read
   importer.py   list import (.txt / .md / .csv), export, checklist templates, examples
+  timer.py      the checklist timer and time logs (plain Python, unit tested)
+  geometry.py   pill snapping (unit tested)
+  system.py     Windows shortcuts, lock/sleep notices, alert sound
+  updates.py    GitHub update check and install
+  companions.py companion apps (Ledger): finding and opening them, shared.json
   themes.py     palettes and the Qt stylesheet; add a theme by adding a palette
   app.py        tray, reminders, backups, startup, single instance
   ui/           windows, list page, date picker, settings
 tests/          python -m pytest tests
 ```
+
+## Licences
+
+Docket's own code is under the licence in `LICENSE`. It's built with Qt for Python (PySide6, LGPLv3),
+Python and PyInstaller; see `THIRD-PARTY-NOTICES.txt`, which the installer also includes.

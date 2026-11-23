@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QLi
                                QTabBar, QToolButton, QVBoxLayout, QWidget)
 
 from .. import dates, themes
+from ..geometry import snap
 from ..store import Item
 from .common import (SIDE_EDGES, WM_NCLBUTTONDBLCLK, ClickableWidget, ElideLabel, TitleBar, edge_hit_test,
                      round_corners, set_prop, win_message)
@@ -28,6 +29,9 @@ if TYPE_CHECKING:
 
 FRAMELESS = Qt.WindowType.FramelessWindowHint
 PILL_LINE_H = 26
+WM_EXITSIZEMOVE = 0x0232
+SNAP_PX = 10
+QT_MAX = 16777215
 
 
 class FitGrip(QSizeGrip):
@@ -78,6 +82,26 @@ class ColorTabBar(QTabBar):
     def __init__(self, app: "DocketApp"):
         super().__init__()
         self.app = app
+        self._press = None
+        self._dragging = False
+
+    def mousePressEvent(self, e) -> None:
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._press = e.position().toPoint()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e) -> None:
+        if (self._press is not None and e.buttons() & Qt.MouseButton.LeftButton and not self._dragging
+                and (e.position().toPoint() - self._press).manhattanLength() >= QApplication.startDragDistance()):
+            self._dragging = True
+            self.update()
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e) -> None:
+        self._press = None
+        self._dragging = False
+        super().mouseReleaseEvent(e)
+        self.update()
 
     def _key(self, i: int) -> str:
         tab = self.app.store.tab(self.tabData(i))
@@ -91,6 +115,8 @@ class ColorTabBar(QTabBar):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         current = self.currentIndex()
         for i in range(self.count()):
+            if self._dragging and i == current:
+                continue                     # Qt draws the tab being dragged itself
             rect = QRectF(self.tabRect(i)).adjusted(1, 2, -1, 0)
             key = self._key(i)
             selected = i == current
@@ -133,6 +159,12 @@ class DocketWindow(QWidget):
         self._pill_top_id: int | None = None
         self._pill_lines: list[QWidget] = []
         self._line_widths: list[int] = []
+        self.pill_only: list[QWidget] = []     # buttons that only exist on the pill
+        self._pulse_left = 0
+        self._pulse_on = False
+        self._pulse_timer = QTimer(self)
+        self._pulse_timer.setInterval(500)
+        self._pulse_timer.timeout.connect(self._pulse_step)
         self.setObjectName("Window")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setMinimumSize(min_size)
@@ -153,10 +185,116 @@ class DocketWindow(QWidget):
     def _wire_title(self) -> None:
         """Call once the subclass has made self.title."""
         self.title.check.toggled.connect(self._tick_top)
+        self.pill_play = icon_button("play", "Start or pause the timer")
+        self.pill_play.clicked.connect(self._pill_play_clicked)
+        self.pill_play.hide()
+        self.pill_only.append(self.pill_play)
+        # After a timed checklist is finished: a quiet "make a PDF in Ledger" icon, until it's reset.
+        self.pill_ledger = icon_button("ledger", "Make a PDF of this time log in Ledger", role="accent")
+        self.pill_ledger.clicked.connect(self._pill_ledger_clicked)
+        self.pill_ledger.hide()
+        self.title._lay.insertWidget(self.title._lay.indexOf(self.title.extra) + 1, self.pill_ledger)
+
+    def _pill_ledger_clicked(self) -> None:
+        page = self.pill_page()
+        if page is not None:
+            self.app.make_pdf(page.tab_id)
+
+    def _sync_pill_ledger(self) -> None:
+        page = self.pill_page()
+        tab = self.app.store.tab(page.tab_id) if page is not None else None
+        self.pill_ledger.setVisible(bool(self.collapsed and tab is not None and tab.is_checklist
+                                         and tab.timer_on and tab.timer_finished))
+
+    def _pill_play_clicked(self) -> None:
+        page = self.pill_page()
+        if page is not None:
+            self.app.toggle_timer(page.tab_id)
+
+    def _button_allowed(self, b: QWidget) -> bool:
+        if b is getattr(self, "pill_play", None):
+            page = self.pill_page()
+            return self.collapsed and page is not None and page.timer_on
+        if b in self.pill_only:
+            return self.collapsed
+        return True
+
+    # ---- snapping and pill heights ---------------------------------------------------
+    def pill_height(self, lines: int) -> int:
+        lines = max(1, min(3, lines))
+        return self.title.height() + 2 + (lines - 1) * PILL_LINE_H + (6 if lines > 1 else 0)
+
+    def snap_height(self) -> None:
+        """A pill is always exactly 1, 2 or 3 items tall."""
+        if not self.collapsed:
+            return
+        one = self.pill_height(1)
+        lines = max(1, min(3, round((self.height() - one) / PILL_LINE_H) + 1))
+        want = self.pill_height(lines)
+        if self.height() != want:
+            self._resize_myself(QSize(self.width(), want))
+
+    def drag_to(self, pos: QPoint) -> None:
+        """Move while dragging by the title; pills snap to other windows and screen edges."""
+        if self.collapsed and self.app.settings.get("snap_pills", True):
+            pos = self._snapped(pos)
+        self.move(pos)
+
+    def _snapped(self, pos: QPoint) -> QPoint:
+        w, h = self.width(), self.height()
+        others = []
+        for win in self.app.all_windows():
+            if win is not self and win.isVisible() and not win.isMinimized():
+                g = win.frameGeometry()
+                others.append((g.left(), g.top(), g.width(), g.height()))
+        screen = QGuiApplication.screenAt(pos + QPoint(w // 2, h // 2)) or self.screen()
+        a = screen.availableGeometry()
+        x, y = snap(pos.x(), pos.y(), w, h, others, (a.left(), a.top(), a.width(), a.height()), SNAP_PX)
+        return QPoint(x, y)
+
+    # ---- time's up ------------------------------------------------------------------------
+    def pulse(self) -> None:
+        """Gently flash the title bar (about 10 seconds, or until clicked)."""
+        self._pulse_left = 20
+        self._pulse_on = False
+        self._pulse_timer.start()
+        self._pulse_step()
+
+    def stop_pulse(self) -> None:
+        if self._pulse_timer.isActive() or self._pulse_on:
+            self._pulse_timer.stop()
+            self._pulse_left = 0
+            self._pulse_on = False
+            self.apply_tint()
+
+    def _pulse_step(self) -> None:
+        if self._pulse_left <= 0:
+            self.stop_pulse()
+            return
+        self._pulse_left -= 1
+        self._pulse_on = not self._pulse_on
+        if self._pulse_on:
+            css = f"background: {themes.tint(self.list_key(), 0.55)};"
+            self.title.setStyleSheet(f"#TitleBar {{ {css} }}")
+            if self.collapsed:
+                self.pill_list.setStyleSheet(f"#PillList {{ {css} }}")
+        else:
+            self.apply_tint()
+
+    def mousePressEvent(self, e) -> None:
+        self.stop_pulse()
+        super().mousePressEvent(e)
+
+    def changeEvent(self, e) -> None:
+        super().changeEvent(e)
+        if e.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            self.app.note_active(self)
 
     # ---- native window bits ------------------------------------------------------
     def nativeEvent(self, event_type, message):
         msg = win_message(event_type, message)
+        if msg is not None and msg.message == WM_EXITSIZEMOVE and self.collapsed:
+            QTimer.singleShot(0, self.snap_height)
         if msg is not None and msg.message == WM_NCLBUTTONDBLCLK and self.collapsed:
             if msg.wParam in SIDE_EDGES:
                 QTimer.singleShot(0, self.toggle_pill_width)
@@ -175,13 +313,13 @@ class DocketWindow(QWidget):
     def enterEvent(self, e) -> None:
         super().enterEvent(e)
         if self.collapsed:
-            for b in self.pill_buttons:
-                b.show()
+            for b in self.pill_buttons + [self.pill_play]:
+                b.setVisible(self._button_allowed(b))
 
     def leaveEvent(self, e) -> None:
         super().leaveEvent(e)
         if self.collapsed:
-            for b in self.pill_buttons:
+            for b in self.pill_buttons + [self.pill_play]:
                 b.hide()
 
     def set_on_top(self, on: bool) -> None:
@@ -265,23 +403,28 @@ class DocketWindow(QWidget):
             self.pill_list.show()
             self.collapsed = True
             self._pill_wide = False
-            self.setMinimumSize(220, self.title.height() + 2)
+            self.setMinimumSize(220, self.pill_height(1))
+            self.setMaximumHeight(self.pill_height(3))
             saved = self.app.pill_rect(self.pill_key)
-            self._resize_myself(QSize(saved[0], saved[1]) if saved else
-                                QSize(self.width(), self.title.height() + 2))
-            for b in self.pill_buttons:
-                b.setVisible(self.underMouse())
+            default_h = self.pill_height(int(self.app.settings.get("pill_lines", 1)))
+            self._resize_myself(QSize(saved[0], saved[1] or default_h) if saved else QSize(self.width(), default_h))
+            self.snap_height()
+            for b in self.pill_buttons + [self.pill_play]:
+                b.setVisible(self.underMouse() and self._button_allowed(b))
             self.title.strip.show()
         else:
             self.pill_list.hide()
             self.body.show()
             self.collapsed = False
+            self.setMaximumHeight(QT_MAX)
             self.setMinimumSize(self.min_size)
             self.resize(self._full_size or QSize(440, 640))
-            for b in self.pill_buttons:
-                b.show()
+            for b in self.pill_buttons + [self.pill_play]:
+                b.setVisible(b not in self.pill_only)
             self.title.strip.hide()
             self.title.check.hide()
+            self.pill_ledger.hide()
+            self.title.extra.setText("")
             self.title.name.setFullText(self.normal_title())
             self.title.setToolTip("")
             set_prop(self.title.extra, "status", "none")
@@ -319,6 +462,7 @@ class DocketWindow(QWidget):
 
     def _save_pill_size(self) -> None:
         if self.collapsed:
+            self.snap_height()
             width = self._pill_set_w if self._pill_wide and self._pill_set_w else self.width()
             self.app.save_pill_rect(self.pill_key, width, self.height(), self.x(), self.y())
 
@@ -355,7 +499,24 @@ class DocketWindow(QWidget):
 
     def _tick_top(self, checked: bool) -> None:
         if checked and self._pill_top_id is not None:
-            self.app.store.update_item(self._pill_top_id, done=True)
+            self.app.set_done(self._pill_top_id, True)
+
+    def update_pill_time(self) -> None:
+        """Every second while a timer runs: refresh the time shown on the pill."""
+        if not self.collapsed:
+            return
+        page = self.pill_page()
+        if page is None or not page.timer_on:
+            return
+        item = next((i for i in page.sorted_items() if not i.done), None)
+        if item is not None:
+            text, status, _tip = page.time_text(item)
+            self.title.extra.setText(text)
+            set_prop(self.title.extra, "status", {"over": "overdue", "running": "today"}.get(status, "none"))
+        tab = self.app.store.tab(page.tab_id)
+        running = bool(tab and tab.timer_running)
+        set_icon_name(self.pill_play, "pause" if running else "play")
+        self.pill_play.setToolTip("Pause the timer" if running else "Start the timer")
 
     def update_pill(self) -> None:
         if not self.collapsed:
@@ -379,7 +540,9 @@ class DocketWindow(QWidget):
             self._pill_top_id = top.id
             self.title.check.show()
             self.title.name.setFullText(top.name)
-            if checklist:
+            if checklist and page.timer_on:
+                self.update_pill_time()
+            elif checklist:
                 self.title.extra.setText(progress)
                 set_prop(self.title.extra, "status", "none")
             else:
@@ -411,6 +574,7 @@ class DocketWindow(QWidget):
             self._line_widths.append(15 + 24 + fm.horizontalAdvance(it.name) + 20
                                      + fm.horizontalAdvance(label) + 30)
         self._pill_lay.addStretch(1)
+        self._sync_pill_ledger()
         self.apply_tint()
 
     def _pill_line(self, it: Item, today: dt.date, color: str, checklist: bool) -> tuple[QWidget, str]:
@@ -427,7 +591,7 @@ class DocketWindow(QWidget):
         check.setCursor(Qt.CursorShape.PointingHandCursor)
         check.setToolTip("Tick off")
         item_id = it.id
-        check.toggled.connect(lambda on: on and self.app.store.update_item(item_id, done=True))
+        check.toggled.connect(lambda on: on and self.app.set_done(item_id, True))
         name = ElideLabel(it.name)
         label = ""
         if not checklist and it.due:
@@ -446,7 +610,8 @@ class DocketWindow(QWidget):
 # ---------------------------------------------------------------------------
 class MainWindow(DocketWindow):
     def __init__(self, app: "DocketApp"):
-        super().__init__(app, Qt.WindowType.Window, "main", QSize(360, 320))
+        # A Tool window has no taskbar button: Docket lives in the tray.
+        super().__init__(app, Qt.WindowType.Tool, "main", QSize(360, 320))
         self.pages: dict[int, ListPage] = {}
         self.setWindowTitle("Docket")
         self.resize(440, 640)
@@ -455,7 +620,15 @@ class MainWindow(DocketWindow):
         root.setContentsMargins(1, 1, 1, 1)
         root.setSpacing(0)
 
-        self.logo = QLabel()
+        self.logo = QToolButton()
+        self.logo.setObjectName("LogoBtn")
+        self.logo.setToolTip("Docket menu: companion apps, time logs, settings")
+        self.logo.setIconSize(QSize(18, 18))
+        self.logo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.logo.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        app_menu = QMenu(self.logo)
+        app_menu.aboutToShow.connect(lambda: app.fill_app_menu(app_menu, self))
+        self.logo.setMenu(app_menu)
         self.title = TitleBar("Docket", self.logo)
         self._wire_title()
         self.theme_btn = icon_button("moon", "Dark mode")
@@ -466,13 +639,14 @@ class MainWindow(DocketWindow):
         self.settings_btn.clicked.connect(app.open_settings)
         self.collapse_btn = icon_button("chevron_up", "Shrink to a pill")
         self.collapse_btn.clicked.connect(self.toggle_collapse)
-        self.min_btn = icon_button("minimize", "Minimize")
-        self.min_btn.clicked.connect(self.showMinimized)
+        self.min_btn = icon_button("minimize", "Hide to the tray")
+        self.min_btn.clicked.connect(self.close)
         self.close_btn = icon_button("close", "Close to the tray (Docket keeps running)")
         self.close_btn.clicked.connect(self.close)
         for b in (self.theme_btn, self.pin_btn, self.settings_btn, self.collapse_btn, self.min_btn, self.close_btn):
             self.title.add(b)
         self.pill_buttons = [self.pin_btn, self.collapse_btn, self.close_btn]
+        self.title._lay.insertWidget(self.title._lay.indexOf(self.pin_btn), self.pill_play)
         root.addWidget(self.title)
         root.addWidget(self.pill_list, 1)
 
@@ -540,11 +714,18 @@ class MainWindow(DocketWindow):
         self.done_btn.setObjectName("LinkBtn")
         self.done_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.done_btn.clicked.connect(lambda: app.set_setting("show_done", not app.settings["show_done"]))
+        self.clear_btn = QPushButton("Clear done")
+        self.clear_btn.setObjectName("LinkBtn")
+        self.clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clear_btn.setToolTip("Delete every ticked item in this list")
+        self.clear_btn.clicked.connect(lambda: self.current_tab_id() is not None
+                                       and app.clear_checked(self.current_tab_id(), self))
         self.backup_label = QLabel()
         grip = FitGrip(self)
         grip.setFixedSize(16, 16)
         fl.addWidget(self.status, 1)
         fl.addWidget(self.reset_btn)
+        fl.addWidget(self.clear_btn)
         fl.addWidget(self.done_btn)
         fl.addWidget(self.backup_label)
         fl.addWidget(grip, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
@@ -562,6 +743,12 @@ class MainWindow(DocketWindow):
         self.retheme()
 
     # ---- window behaviour ------------------------------------------------------------
+    def nativeEvent(self, event_type, message):
+        msg = win_message(event_type, message)
+        if msg is not None and msg.message in (0x0312, 0x02B1, 0x0218):   # shortcut, lock, sleep
+            self.app.handle_native(msg)
+        return super().nativeEvent(event_type, message)
+
     def closeEvent(self, e: QCloseEvent) -> None:
         if self.app.quitting:
             e.accept()
@@ -596,6 +783,7 @@ class MainWindow(DocketWindow):
         return self.tabs.sizeHint().width() + 80
 
     def mode_changed(self) -> None:
+        self.title.manual = self.collapsed      # pills move by hand so they can snap
         for b in (self.theme_btn, self.settings_btn, self.min_btn):
             b.setVisible(not self.collapsed)
         self.logo.setVisible(not self.collapsed)
@@ -604,7 +792,7 @@ class MainWindow(DocketWindow):
         self.update_footer()
 
     def retheme(self) -> None:
-        self.logo.setPixmap(app_icon(themes.current["accent"], themes.current["win"]).pixmap(16, 16))
+        self.logo.setIcon(app_icon(themes.current["accent"], themes.current["win"]))
         dark = self.app.settings["theme"] == "dark"
         set_icon_name(self.theme_btn, "sun" if dark else "moon")
         self.theme_btn.setToolTip("Light mode" if dark else "Dark mode")
@@ -831,6 +1019,8 @@ class MainWindow(DocketWindow):
         self.reset_btn.setVisible(checklist)
         self.done_btn.setText("Hide done" if self.app.settings["show_done"] else "Show done")
         self.done_btn.setVisible(page is not None)
+        has_done = page is not None and any(i.done for i in self.app.store.items(page.tab_id))
+        self.clear_btn.setVisible(has_done)
         self.backup_label.setText(self.app.backup_status())
         self.update_pill()
 
@@ -868,10 +1058,12 @@ class PopoutWindow(DocketWindow):
         self.collapse_btn.clicked.connect(self.toggle_collapse)
         self.dock_btn = icon_button("dock", "Put back into the main window's tabs")
         self.dock_btn.clicked.connect(lambda: app.dock(tab_id))
+        self.title.add(self.pill_play)
         self.title.add(self.pin_btn)
         self.title.add(self.collapse_btn)
         self.title.add(self.dock_btn)
         self.pill_buttons = [self.pin_btn, self.collapse_btn, self.dock_btn]
+        self.pill_only.append(self.pin_btn)
         root.addWidget(self.title)
         root.addWidget(self.pill_list, 1)
 
@@ -924,10 +1116,6 @@ class PopoutWindow(DocketWindow):
         self.collapse_btn.setToolTip("Open the list" if self.collapsed else "Shrink to a pill")
         self.update_counts()
 
-    def toggle_collapse(self) -> None:
-        super().toggle_collapse()
-        if not self.collapsed:
-            self.pin_btn.hide()           # the pill's pin only shows on the pill
 
     def retheme(self) -> None:
         self.dot.setPixmap(dot_icon(self.list_color(), 10).pixmap(10, 10))

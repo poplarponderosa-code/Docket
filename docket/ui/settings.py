@@ -10,12 +10,14 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QSize, Qt, QTime, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog,
-                               QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+                               QFrame, QGridLayout, QHBoxLayout, QKeySequenceEdit, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem,
                                QPushButton, QScrollArea,
                                QSizePolicy, QSpinBox, QTimeEdit, QToolButton, QVBoxLayout, QWidget)
 
-from .. import themes
+from .. import __version__, themes, updates
 from .icons import make_icon, swatch_icon
 
 if TYPE_CHECKING:
@@ -91,6 +93,23 @@ class SettingsDialog(QDialog):
         v.addWidget(self._hint("Each item can have its own time (open the item). Reminders arrive on the "
                                "item's start date, or right away if it's already late. Checklists have none."))
 
+        # ---- pills
+        v.addWidget(self._section("PILLS"))
+        prow = QHBoxLayout()
+        prow.addWidget(QLabel("New pills show"))
+        self.lines_box = QComboBox()
+        for n in (1, 2, 3):
+            self.lines_box.addItem(f"{n} item{'s' if n > 1 else ''}", n)
+        self.lines_box.setCurrentIndex(max(0, int(s.get("pill_lines", 1)) - 1))
+        self.lines_box.currentIndexChanged.connect(
+            lambda i: app.set_setting("pill_lines", self.lines_box.itemData(i)))
+        prow.addWidget(self.lines_box)
+        prow.addStretch(1)
+        v.addLayout(prow)
+        v.addWidget(self._check("Snap pills to each other, the main window and screen edges", "snap_pills"))
+        v.addWidget(self._hint("Drag a pill's bottom edge to show 1, 2 or 3 items. Double-click its side edge to "
+                               "fit the whole item's width."))
+
         # ---- columns & sorting
         v.addWidget(self._section("COLUMNS & SORTING (PRIORITY LISTS)"))
         v.addWidget(self._hint("Drag a column by its handle to change the order, left to right. "
@@ -119,6 +138,26 @@ class SettingsDialog(QDialog):
         sort_row.addStretch(1)
         v.addLayout(sort_row)
         v.addWidget(self._check("Show completed items", "show_done"))
+
+        # ---- checklist timer
+        v.addWidget(self._section("CHECKLIST TIMER"))
+        v.addWidget(self._hint("Turn a checklist's timer on with right-click its tab > Use a timer. Time runs on "
+                               "the top unticked step; ticking it starts the next one. Click a step to give it a "
+                               "time limit, and the total in the header for a limit on the whole checklist."))
+        v.addWidget(self._check("Play a sound when time's up", "timer_sound"))
+        v.addWidget(self._field_label("Time logs folder (saved when you tick the last step)"))
+        self.log_folder = QLineEdit(str(app.timelog_dir()))
+        self.log_folder.setReadOnly(True)
+        v.addWidget(self.log_folder)
+        v.addLayout(self._buttons([("Change folder…", self._change_logs), ("Open folder", self._open_logs)]))
+        v.addWidget(self._check("Also save a CSV copy (opens in Excel or Google Sheets)", "timelog_csv"))
+        from .. import companions
+        ledger = companions.get("ledger")
+        has_ledger = ledger is not None and companions.find(ledger) is not None
+        v.addLayout(self._buttons([("Open Ledger" if has_ledger else "Get Ledger…",
+                                    lambda: app.open_companion("ledger"))]))
+        v.addWidget(self._hint("Docket Ledger, the companion app, turns time logs into tidy PDF timesheets. "
+                               "It finds this folder by itself."))
 
         # ---- backup
         v.addWidget(self._section("BACKUP"))
@@ -183,6 +222,65 @@ class SettingsDialog(QDialog):
         v.addLayout(exp)
         v.addLayout(self._buttons([("Save example files…", lambda: app.save_examples(self))]))
         v.addWidget(self._hint("Example files show every format Docket reads, including checklists and colours."))
+
+        # ---- keyboard shortcuts
+        v.addWidget(self._section("KEYBOARD SHORTCUTS"))
+        v.addWidget(self._hint("These work from any program. Click a box and press the keys you want; "
+                               "Backspace clears it."))
+        self.key_edits: dict[str, QKeySequenceEdit] = {}
+        self.key_status: dict[str, QLabel] = {}
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(4)
+        for row, (key, label) in enumerate((("hotkey_show", "Show or hide Docket"),
+                                            ("hotkey_tick", "Tick the top item"),
+                                            ("hotkey_timer", "Start or pause the timer"))):
+            grid.addWidget(QLabel(label), row * 2, 0)
+            edit = QKeySequenceEdit(QKeySequence(s.get(key, ""), QKeySequence.SequenceFormat.PortableText))
+            if hasattr(edit, "setMaximumSequenceLength"):
+                edit.setMaximumSequenceLength(1)
+            if hasattr(edit, "setClearButtonEnabled"):
+                edit.setClearButtonEnabled(True)
+            edit.editingFinished.connect(lambda k=key, e=edit: self._save_key(k, e))
+            edit.keySequenceChanged.connect(lambda seq, k=key, e=edit: seq.isEmpty() and self._save_key(k, e))
+            grid.addWidget(edit, row * 2, 1)
+            status = QLabel()
+            status.setObjectName("Hint")
+            status.setWordWrap(True)
+            grid.addWidget(status, row * 2 + 1, 1)
+            self.key_edits[key] = edit
+            self.key_status[key] = status
+        grid.setColumnStretch(1, 1)
+        v.addLayout(grid)
+        v.addLayout(self._buttons([("Reset to F13, F14, F15", self._reset_keys)]))
+        info = QFrame()
+        info.setObjectName("InfoBox")
+        ib = QVBoxLayout(info)
+        ib.setContentsMargins(12, 10, 12, 10)
+        text = QLabel(
+            "<b>Using a Stream Deck</b><br>"
+            "1. In the Stream Deck app, drag a <b>Hotkey</b> action (under System) onto a key.<br>"
+            "2. Click its Hotkey box and press the shortcut from above. Keys like F13, F14 and F15 "
+            "aren't on most keyboards, so they can't clash with other programs' shortcuts. Type them "
+            "with the Stream Deck's own key list if your keyboard has no F13.<br>"
+            "3. Do the same for the other two actions.<br>"
+            "Tick and timer act on the checklist whose timer is running, otherwise on the list you "
+            "used last.")
+        text.setWordWrap(True)
+        text.setTextFormat(Qt.TextFormat.RichText)
+        ib.addWidget(text)
+        v.addWidget(info)
+        self.sync_hotkey_status()
+
+        # ---- about & updates
+        v.addWidget(self._section("ABOUT & UPDATES"))
+        v.addWidget(QLabel(f"Docket {__version__}"))
+        v.addWidget(self._check("Check for updates once a day", "auto_update"))
+        v.addLayout(self._buttons([("Check for updates", lambda: app.check_for_updates(True, self)),
+                                   ("Release page", self._open_releases)]))
+        self.update_status = self._hint("")
+        v.addWidget(self.update_status)
+        v.addLayout(self._buttons([("Third-party notices", self._open_notices)]))
         v.addStretch(1)
 
         close = QPushButton("Close")
@@ -281,6 +379,7 @@ class SettingsDialog(QDialog):
             self.folder.setText(path)
             self.app.set_setting("backup_dir", path)
             self.tpl_folder.setText(str(self.app.templates_dir()))
+            self.log_folder.setText(str(self.app.timelog_dir()))
 
     def _open_backups(self) -> None:
         self._open(Path(self.app.backup_dir()))
@@ -325,6 +424,46 @@ class SettingsDialog(QDialog):
         tid = self.export_box.currentData()
         if tid is not None:
             self.app.export_list(tid, self)
+
+    def _save_key(self, key: str, edit: QKeySequenceEdit) -> None:
+        text = edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+        self.app.set_setting(key, text)
+        self.sync_hotkey_status()
+
+    def _reset_keys(self) -> None:
+        for key, default in (("hotkey_show", "F13"), ("hotkey_tick", "F14"), ("hotkey_timer", "F15")):
+            self.key_edits[key].setKeySequence(QKeySequence(default))
+            self.app.set_setting(key, default)
+        self.sync_hotkey_status()
+
+    def sync_hotkey_status(self) -> None:
+        for key, label in self.key_status.items():
+            problem = self.app.hotkey_status.get(key, "")
+            label.setText(problem if problem else ("" if self.app.settings.get(key) else "Off"))
+
+    def set_update_status(self, text: str) -> None:
+        self.update_status.setText(text)
+
+    def _change_logs(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Choose a folder for time logs", self.log_folder.text())
+        if path:
+            self.app.set_setting("timelog_dir", path)
+            self.log_folder.setText(str(self.app.timelog_dir()))
+
+    def _open_logs(self) -> None:
+        self._open(self.app.timelog_dir())
+
+    def _open_releases(self) -> None:
+        QDesktopServices.openUrl(QUrl(updates.RELEASES_PAGE))
+
+    def _open_notices(self) -> None:
+        import sys
+        base = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[2]
+        notices = base / "THIRD-PARTY-NOTICES.txt"
+        if notices.exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(notices)))
+        else:
+            QDesktopServices.openUrl(QUrl(f"https://github.com/{updates.GITHUB_REPO}"))
 
     def update_last(self) -> None:
         self.last_label.setText(self.app.backup_status(long=True))

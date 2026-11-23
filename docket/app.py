@@ -6,14 +6,16 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QEvent, QObject, QPoint, Qt, QTimer, QUrl
+from PySide6.QtCore import QByteArray, QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QFont, QGuiApplication
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QAbstractScrollArea, QAbstractSpinBox, QApplication, QComboBox, QFileDialog,
+                               QProgressDialog,
                                QMenu, QMessageBox, QSystemTrayIcon, QWidget)
 
-from . import backup, dates, importer, themes
+from . import __version__, backup, companions, dates, importer, system, themes, updates
 from .store import Store
+from .timer import TimerEngine, fmt_duration
 from .ui.icons import app_icon, dot_icon, refresh_icons
 from .ui.settings import SettingsDialog
 from .ui.windows import MainWindow, PopoutWindow, confirm
@@ -36,6 +38,8 @@ class WheelGuard(QObject):
         return False
 
 
+HOTKEYS = {1: "hotkey_show", 2: "hotkey_tick", 3: "hotkey_timer"}
+
 DEFAULTS = {
     "theme": "light",
     "sort_key": "due", "sort_dir": 1,
@@ -50,6 +54,11 @@ DEFAULTS = {
     "last_backup": "",
     "main_geometry": "",
     "tray_hint_shown": False,
+    "pill_lines": 1, "snap_pills": True,
+    "timer_sound": True, "timelog_dir": "", "timelog_csv": True,
+    "hotkey_show": "F13", "hotkey_tick": "F14", "hotkey_timer": "F15",
+    "auto_update": True, "last_update_check": "", "skip_version": "",
+    "last_logs": {},
 }
 
 
@@ -102,6 +111,12 @@ class DocketApp(QObject):
         self.dirty = False
         self.data_dir = data_dir()
         self.store = Store(self.data_dir / "docket.db")
+        self.timer = TimerEngine(self.store)
+        self.hotkey_status: dict[str, str] = {}
+        self.last_active_tab: int | None = None
+        self._lock_paused: list[int] = []
+        self._last_clock = dt.datetime.now()
+        self._clock_count = 0
         self.settings = {k: self.store.get_setting(k, v) for k, v in DEFAULTS.items()}
         first_run = not self.store.tabs()
         if first_run:
@@ -179,6 +194,27 @@ class DocketApp(QObject):
         self.update_counts()
         qapp.aboutToQuit.connect(self._shutdown)
 
+        # Windows: shortcuts and lock/unlock notices go to the main window (even while hidden).
+        hwnd = int(self.main.winId())
+        system.watch_session(hwnd)
+        self.register_hotkeys()
+
+        # The checklist timer's clock.
+        self._clock = QTimer(self)
+        self._clock.setInterval(1000)
+        self._clock.timeout.connect(self._clock_tick)
+        self._clock.start()
+        recovered = self.timer.recover()
+        if recovered:
+            QTimer.singleShot(1500, lambda: self.offer_resume([t.id for t in recovered],
+                                                              "when Docket was last closed"))
+
+        self.write_shared()
+        self.updater = updates.UpdateChecker(self)
+        QTimer.singleShot(20_000, self._auto_update_check)
+        if "--updated" in argv:
+            QTimer.singleShot(1200, lambda: self.flash(f"Updated to Docket {__version__}"))
+
     def _seed(self) -> None:
         today = dt.date.today()
         t = self.store.add_tab("Welcome", color="blue")
@@ -212,6 +248,19 @@ class DocketApp(QObject):
             if key in ("hide_pri", "col_order") and self.settings_dialog is not None:
                 dialog = self.settings_dialog
                 QTimer.singleShot(0, lambda: dialog.sync_columns())
+        elif key == "pill_lines":
+            # The new default applies to every pill; their widths and places are kept.
+            sizes = {k: [v[0], 0] + list(v[2:]) for k, v in self.settings["pill_sizes"].items() if v}
+            self.settings["pill_sizes"] = sizes
+            self.store.set_setting("pill_sizes", sizes)
+            for w in self.all_windows():
+                if w.collapsed:
+                    w._resize_myself(QSize(w.width(), w.pill_height(int(value))))
+                    w.update_pill()
+        elif key.startswith("hotkey_"):
+            self.register_hotkeys()
+        elif key in ("timelog_dir", "backup_dir", "templates_dir"):
+            self.write_shared()
         elif key == "tab_tint":
             self.main.rebuild_tabs()
             for w in [self.main, *self.popouts.values()]:
@@ -262,6 +311,9 @@ class DocketApp(QObject):
         """[width, height] or [width, height, x, y] of a window's pill."""
         rect = self.settings["pill_sizes"].get(key)
         return [int(v) for v in rect] if rect else None
+
+    def all_windows(self) -> list:
+        return [self.main, *self.popouts.values()]
 
     def save_pill_rect(self, key: str, width: int, height: int, x: int, y: int) -> None:
         sizes = dict(self.settings["pill_sizes"])
@@ -428,7 +480,19 @@ class DocketApp(QObject):
                                     lambda k=key: self.store.set_tab_color(tab_id, k))
             act.setCheckable(True)
             act.setChecked(tab.color == key)
+        menu.addAction("Edit description…", lambda: self.edit_description(tab_id))
+        if any(i.done for i in self.store.items(tab_id)):
+            menu.addAction("Clear checked items…", lambda: self.clear_checked(tab_id, parent))
         if tab.is_checklist:
+            menu.addAction("Categories…", lambda: self._edit_categories(tab_id))
+            menu.addAction("Turn the timer off" if tab.timer_on else "Use a timer",
+                           lambda: self.set_timer_on(tab_id, not tab.timer_on))
+            if tab.timer_on:
+                menu.addAction("Export time log…", lambda: self.save_time_log(tab_id, parent=parent))
+                ledger = companions.get("ledger")
+                installed = companions.find(ledger) is not None
+                menu.addAction("Make a PDF in Ledger…" if installed else "Get Ledger to make PDFs…",
+                               lambda: self.make_pdf(tab_id))
             menu.addAction("Show as a priority list", lambda: self.store.set_tab_kind(tab_id, "list"))
             menu.addAction("Reset checklist…", lambda: self.reset_checklist(tab_id, parent))
             menu.addAction("Save as template…", lambda: self.save_template(tab_id, parent))
@@ -437,13 +501,327 @@ class DocketApp(QObject):
         menu.addAction("Export this list…", lambda: self.export_list(tab_id, parent))
 
     def reset_checklist(self, tab_id: int, parent: QWidget) -> None:
-        done = sum(1 for i in self.store.items(tab_id) if i.done)
-        if not done:
-            self.flash("Nothing ticked yet")
+        items = self.store.items(tab_id)
+        done = sum(1 for i in items if i.done)
+        timed = any(i.started or i.elapsed for i in items)
+        if not done and not timed:
+            self.flash("Nothing to reset yet")
             return
-        if confirm(parent, "Reset checklist", f"Untick all {done} step{'s' if done != 1 else ''}?"):
+        text = f"Untick all {done} step{'s' if done != 1 else ''}?" if done else "Clear the recorded times?"
+        if timed:
+            text += "\n\nThis also clears the recorded times. Export the time log first if you want to keep it."
+        if confirm(parent, "Reset checklist", text):
+            self.timer.reset(tab_id)
             self.store.reset_checklist(tab_id)
             self.flash("Checklist reset")
+
+    # ---- the checklist timer -----------------------------------------------------------------
+    def page_for(self, tab_id: int):
+        if tab_id in self.main.pages:
+            return self.main.pages[tab_id]
+        w = self.popouts.get(tab_id)
+        return w.page if w is not None else None
+
+    def windows_showing(self, tab_id: int) -> list:
+        shown = []
+        w = self.popouts.get(tab_id)
+        if w is not None and w.isVisible():
+            shown.append(w)
+        if self.main.isVisible() and self.main.current_tab_id() == tab_id:
+            shown.append(self.main)
+        return shown
+
+    def set_done(self, item_id: int, done: bool) -> None:
+        item = self.store.item(item_id)
+        finished = self.timer.set_done(item_id, done)
+        if finished and item is not None:
+            path = self.save_time_log(item.tab_id, auto=True)
+            total = fmt_duration(self.timer.total_elapsed(item.tab_id))
+            self.flash(f"Checklist done in {total}" + (" · time log saved" if path else ""))
+
+    def toggle_timer(self, tab_id: int) -> None:
+        tab = self.store.tab(tab_id)
+        if tab is None:
+            return
+        if not tab.timer_on:
+            self.set_timer_on(tab_id, True)
+        running = self.timer.toggle(tab_id)
+        if not running and not self.store.tab(tab_id).timer_running and self.timer.current_item(tab_id) is None:
+            self.flash("Every step is ticked. Reset the checklist to time it again.")
+        self.refresh_times()
+
+    def play_item(self, tab_id: int, item_id: int) -> None:
+        item = self.store.item(item_id)
+        if item is not None and item.run_from:
+            self.timer.pause(tab_id)
+        else:
+            self.timer.make_current(tab_id, item_id)
+        self.refresh_times()
+
+    def set_timer_on(self, tab_id: int, on: bool) -> None:
+        tab = self.store.tab(tab_id)
+        if tab is None:
+            return
+        if not on and tab.timer_running:
+            self.timer.pause(tab_id)
+        self.store.update_tab(tab_id, timer_on=on)
+
+    def edit_description(self, tab_id: int) -> None:
+        page = self.page_for(tab_id)
+        if page is not None:
+            page.edit_description()
+
+    def timelog_dir(self) -> Path:
+        if self.settings["timelog_dir"]:
+            return Path(self.settings["timelog_dir"])
+        return self.backup_dir() / "Time logs"
+
+    def save_time_log(self, tab_id: int, auto: bool = False, parent: QWidget | None = None) -> Path | None:
+        tab = self.store.tab(tab_id)
+        if tab is None:
+            return None
+        folder = self.timelog_dir()
+        stem = f"{importer.safe_filename(tab.name)} {dt.datetime.now():%Y-%m-%d %H%M}"
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f"{stem}.txt"
+            path.write_text(self.timer.log_text(tab_id), encoding="utf-8")
+            if self.settings["timelog_csv"]:
+                (folder / f"{stem}.csv").write_text(self.timer.log_csv(tab_id), encoding="utf-8-sig",
+                                                     newline="")
+        except OSError as e:
+            if not auto:
+                QMessageBox.warning(parent or self.main, "Time log", f"Couldn't save the time log: {e}")
+            return None
+        logs = dict(self.settings["last_logs"])
+        csv_path = folder / f"{stem}.csv"
+        logs[str(tab_id)] = str(csv_path if csv_path.exists() else path)
+        self.settings["last_logs"] = logs
+        self.store.set_setting("last_logs", logs)
+        if not auto:
+            self.flash(f"Saved “{path.name}”")
+        return path
+
+    def refresh_times(self) -> None:
+        for page in self.pages():
+            if page.timer_on:
+                page.update_times()
+        for w in self.all_windows():
+            w.update_pill_time()
+
+    def _clock_tick(self) -> None:
+        now = dt.datetime.now()
+        gap = (now - self._last_clock).total_seconds()
+        last = self._last_clock
+        self._last_clock = now
+        if gap > 90:                                   # the PC was asleep
+            paused = self.timer.pause_all(at=last)
+            if paused:
+                self.offer_resume([t.id for t in paused], "while your PC was asleep")
+            return
+        running = self.timer.running_tab()
+        if running is None:
+            return
+        self._clock_count += 1
+        if self._clock_count % 15 == 0:
+            self.timer.heartbeat(now)
+        page = self.page_for(running.id)
+        if page is not None:
+            page.update_times()
+        for w in self.windows_showing(running.id) + [p for p in self.popouts.values() if p.tab_id == running.id]:
+            w.update_pill_time()
+        for tab, item in self.timer.due_alerts(now):
+            self.times_up(tab, item)
+
+    def times_up(self, tab, item) -> None:
+        if self.settings["timer_sound"]:
+            system.play_alert()
+        windows = self.windows_showing(tab.id)
+        for w in windows:
+            w.pulse()
+        what = f"“{item.name}”" if item is not None else f"the whole of “{tab.name}”"
+        if not windows:
+            self.tray.showMessage("Time's up", f"The time for {what} is up.",
+                                  QSystemTrayIcon.MessageIcon.Information, 8000)
+        else:
+            self.flash(f"Time's up for {what}")
+
+    def offer_resume(self, tab_ids: list[int], reason: str) -> None:
+        tabs = [self.store.tab(t) for t in tab_ids]
+        tabs = [t for t in tabs if t is not None and not t.timer_running]
+        if not tabs:
+            return
+        tab = tabs[0]
+        box = QMessageBox(self.main if self.main.isVisible() else None)
+        box.setWindowTitle("Timer paused")
+        box.setText(f"The timer for “{tab.name}” was paused {reason}.\n\nResume it now?")
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.Yes)
+        box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        box.exec()
+        if box.clickedButton() == box.button(QMessageBox.StandardButton.Yes):
+            self.timer.start(tab.id)
+            self.refresh_times()
+
+    # ---- Windows messages: shortcuts, lock, sleep ------------------------------------------------
+    def handle_native(self, msg) -> None:
+        if msg.message == system.WM_HOTKEY:
+            QTimer.singleShot(0, lambda hid=int(msg.wParam): self.on_hotkey(hid))
+        elif msg.message == system.WM_WTSSESSION_CHANGE:
+            if msg.wParam == system.WTS_SESSION_LOCK:
+                self._pause_for_lock()
+            elif msg.wParam == system.WTS_SESSION_UNLOCK:
+                QTimer.singleShot(800, self._resume_after_lock)
+        elif msg.message == system.WM_POWERBROADCAST:
+            if msg.wParam == system.PBT_APMSUSPEND:
+                self._pause_for_lock()
+            elif msg.wParam in (system.PBT_APMRESUMEAUTOMATIC, system.PBT_APMRESUMESUSPEND):
+                QTimer.singleShot(1500, self._resume_after_lock)
+
+    def _pause_for_lock(self) -> None:
+        paused = self.timer.pause_all()
+        self._lock_paused += [t.id for t in paused]
+        if paused:
+            self.refresh_times()
+
+    def _resume_after_lock(self) -> None:
+        ids, self._lock_paused = self._lock_paused, []
+        self._last_clock = dt.datetime.now()
+        if ids:
+            self.offer_resume(ids, "while your PC was locked")
+
+    def register_hotkeys(self) -> None:
+        hwnd = int(self.main.winId())
+        for hotkey_id, key in HOTKEYS.items():
+            self.hotkey_status[key] = system.register_hotkey(hwnd, hotkey_id, self.settings[key])
+        if self.settings_dialog is not None:
+            self.settings_dialog.sync_hotkey_status()
+
+    def note_active(self, window) -> None:
+        page = window.pill_page()
+        if page is not None:
+            self.last_active_tab = page.tab_id
+
+    def active_tab_id(self) -> int | None:
+        running = self.timer.running_tab()
+        if running is not None:
+            return running.id
+        if self.last_active_tab is not None and self.store.tab(self.last_active_tab) is not None:
+            return self.last_active_tab
+        return self.main.current_tab_id()
+
+    def on_hotkey(self, hotkey_id: int) -> None:
+        key = HOTKEYS.get(hotkey_id)
+        if key == "hotkey_show":
+            if self.main.isVisible() and self.main.isActiveWindow() and not self.main.isMinimized():
+                self.main.hide()
+            else:
+                self.show_all()
+        elif key == "hotkey_tick":
+            tab_id = self.active_tab_id()
+            if tab_id is None:
+                return
+            page = self.page_for(tab_id)
+            items = page.sorted_items() if page is not None else self.store.items(tab_id)
+            top = next((i for i in items if not i.done), None)
+            if top is not None:
+                self.set_done(top.id, True)
+                self.flash(f"Ticked “{top.name}”")
+        elif key == "hotkey_timer":
+            running = self.timer.running_tab()
+            tab_id = running.id if running is not None else self.active_tab_id()
+            if tab_id is None:
+                return
+            tab = self.store.tab(tab_id)
+            if tab is None or not tab.is_checklist:
+                self.flash("The timer is for checklists")
+                return
+            self.toggle_timer(tab_id)
+
+    # ---- updates -------------------------------------------------------------------------------
+    def _auto_update_check(self) -> None:
+        if not self.settings["auto_update"]:
+            return
+        last = self.settings["last_update_check"]
+        try:
+            if last and dt.datetime.now() - dt.datetime.fromisoformat(last) < dt.timedelta(hours=20):
+                return
+        except ValueError:
+            pass
+        self.check_for_updates(manual=False)
+
+    def check_for_updates(self, manual: bool = True, parent: QWidget | None = None) -> None:
+        def result(release, error) -> None:
+            self.set_setting("last_update_check", dt.datetime.now().isoformat(timespec="seconds"))
+            if release is None:
+                if manual:
+                    QMessageBox.information(parent or self.main, "Updates",
+                                            f"Couldn't check for updates right now.\n\n{error}")
+                return
+            tag = release.get("tag_name", "")
+            if not updates.is_newer(tag):
+                if manual:
+                    QMessageBox.information(parent or self.main, "Updates",
+                                            f"You have the latest version ({__version__}).")
+                return
+            if not manual and tag == self.settings["skip_version"]:
+                return
+            self._offer_update(release, parent)
+
+        if manual and self.settings_dialog is not None:
+            self.settings_dialog.set_update_status("Checking…")
+        self.updater.check(result)
+
+    def _offer_update(self, release: dict, parent: QWidget | None) -> None:
+        tag = release.get("tag_name", "")
+        notes = (release.get("body") or "").strip()
+        box = QMessageBox(parent or self.main)
+        box.setWindowTitle("Update available")
+        box.setText(f"Docket {tag.lstrip('vV')} is available. You have {__version__}.")
+        if notes:
+            box.setInformativeText(notes[:600] + ("…" if len(notes) > 600 else ""))
+        now_btn = box.addButton("Update now", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        skip_btn = box.addButton("Skip this version", QMessageBox.ButtonRole.DestructiveRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == skip_btn:
+            self.set_setting("skip_version", tag)
+        elif clicked == now_btn:
+            self._download_update(release, parent)
+
+    def _download_update(self, release: dict, parent: QWidget | None) -> None:
+        asset = updates.pick_installer(release)
+        if asset is None or not getattr(sys, "frozen", False):
+            # Running from the Python files, or no installer attached: open the release page.
+            QDesktopServices.openUrl(QUrl(release.get("html_url") or updates.RELEASES_PAGE))
+            return
+        name, url = asset
+        dest = updates.download_path(name)
+        progress = QProgressDialog("Downloading the update…", "Cancel", 0, 100, parent or self.main)
+        progress.setWindowTitle("Updating Docket")
+        progress.setMinimumDuration(0)
+        progress.canceled.connect(self.updater.cancel)
+
+        def on_progress(received: int, total: int) -> None:
+            if total > 0:
+                progress.setValue(int(received * 100 / total))
+
+        def on_done(path, error) -> None:
+            progress.close()
+            if path is None:
+                if error and "cancel" not in error.lower():
+                    QMessageBox.warning(parent or self.main, "Update", f"The download didn't finish: {error}")
+                return
+            for page in list(self.pages()):
+                page.flush()
+            if updates.run_installer_and_quit_soon(path):
+                self.quit()
+            else:
+                QMessageBox.warning(parent or self.main, "Update",
+                                    f"Couldn't start the installer. It's saved here:\n{path}")
+
+        self.updater.download(url, dest, on_progress, on_done)
 
     def templates_dir(self) -> Path:
         if self.settings["templates_dir"]:
@@ -522,6 +900,92 @@ class DocketApp(QObject):
             QMessageBox.warning(parent, "Export", f"Couldn't save the file: {e}")
             return
         self.flash(f"Exported “{tab.name}”")
+
+    # ---- clearing ticked items ------------------------------------------------------------------
+    def clear_checked(self, tab_id: int, parent: QWidget) -> None:
+        items = self.store.items(tab_id)
+        done = [i for i in items if i.done]
+        if not done:
+            self.flash("Nothing is ticked")
+            return
+        tab = self.store.tab(tab_id)
+        n = len(done)
+        what = "step" if tab is not None and tab.is_checklist else "item"
+        text = f"Delete the {n} checked {what}{'s' if n != 1 else ''} in “{tab.name if tab else ''}”?"
+        if any(i.elapsed or i.started for i in done):
+            text += "\n\nTheir recorded times go too. Export the time log first if you want to keep it."
+        text += "\n\nThis can't be undone here, but your backups still have them."
+        if confirm(parent, "Clear checked items", text):
+            removed = self.store.delete_done(tab_id)
+            self.flash(f"Cleared {removed} checked {what}{'s' if removed != 1 else ''}")
+
+    def _edit_categories(self, tab_id: int) -> None:
+        page = self.page_for(tab_id)
+        if page is not None:
+            page.edit_categories()
+
+    # ---- companion apps (Ledger) ----------------------------------------------------------------
+    def write_shared(self) -> None:
+        """Tell companion apps where Docket keeps things (they read %APPDATA%\\Docket\\shared.json)."""
+        companions.write_shared(self.data_dir, {
+            "docket_version": __version__,
+            "timelog_dir": str(self.timelog_dir()),
+            "templates_dir": str(self.templates_dir()),
+            "backup_dir": str(self.backup_dir()),
+            "updated": dt.datetime.now().isoformat(timespec="seconds"),
+        })
+
+    def fill_app_menu(self, menu: QMenu, parent: QWidget) -> None:
+        """The D logo's menu. Each companion app gets an Open (or Get…) line."""
+        menu.clear()
+        for comp in companions.COMPANIONS:
+            installed = companions.find(comp) is not None
+            act = menu.addAction(f"Open {comp.name}" if installed else f"Get {comp.name}…",
+                                 lambda c=comp.key: self.open_companion(c))
+            act.setToolTip(comp.full_name)
+        menu.addAction("Open time logs folder", self.open_timelogs)
+        menu.addSeparator()
+        menu.addAction("Settings", self.open_settings)
+        menu.addAction("Check for updates", lambda: self.check_for_updates(True, parent))
+        menu.addSeparator()
+        menu.addAction("Quit Docket", self.quit)
+
+    def open_companion(self, key: str, extra_args: list[str] | None = None) -> bool:
+        """Open a companion app at Docket's time logs, or its download page if it isn't installed."""
+        comp = companions.get(key)
+        if comp is None:
+            return False
+        self.write_shared()
+        args = ["--folder", str(self.timelog_dir())] + list(extra_args or [])
+        if companions.launch(comp, args):
+            return True
+        QDesktopServices.openUrl(QUrl(comp.releases_url))
+        self.flash(f"{comp.full_name} isn't installed yet. Opening its download page.")
+        return False
+
+    def open_timelogs(self) -> None:
+        folder = self.timelog_dir()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def make_pdf(self, tab_id: int) -> None:
+        """Open this checklist's newest time log in Ledger (saving one first if there isn't one)."""
+        comp = companions.get("ledger")
+        if comp is None:
+            return
+        if companions.find(comp) is None:
+            self.open_companion("ledger")
+            return
+        last = Path(self.settings["last_logs"].get(str(tab_id), "") or ".")
+        if not last.is_file():
+            if self.save_time_log(tab_id, auto=True) is None:
+                self.flash("Couldn't save a time log for Ledger")
+                return
+            last = Path(self.settings["last_logs"].get(str(tab_id), ""))
+        self.open_companion("ledger", ["--open", str(last)])
 
     def delete_tab(self, tab_id: int, parent: QWidget) -> None:
         tabs = self.store.tabs()
@@ -749,6 +1213,13 @@ class DocketApp(QObject):
 
     def _shutdown(self) -> None:
         self.quitting = True
+        try:
+            self.timer.heartbeat()
+            hwnd = int(self.main.winId())
+            for hotkey_id in HOTKEYS:
+                system.unregister_hotkey(hwnd, hotkey_id)
+        except Exception:
+            pass
         for page in list(self.pages()):
             page.flush()
         if self.main.isVisible() and not self.main.collapsed:
