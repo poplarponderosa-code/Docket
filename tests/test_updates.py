@@ -21,3 +21,13 @@ def test_release_parsing_and_asset():
     assert updates.pick_installer(rel) == ("Docket-Setup-1.2.0.exe", "https://e/Docket-Setup-1.2.0.exe")
     assert updates.parse_release(b"not json") is None and updates.parse_release(b'{"message": "Not Found"}') is None
     assert updates.download_path("Docket Setup?.exe").name == "Docket_Setup_.exe"
+
+
+def test_installer_command_keeps_plain_quotes():
+    from pathlib import Path
+    from docket.updates import installer_command
+    cmd = installer_command(Path(r"C:\Users\James\AppData\Local\Temp\Docket-Setup-1.2.1.exe"))
+    assert isinstance(cmd, str)
+    assert '\\"' not in cmd
+    assert 'start "" "C:\\Users\\James\\AppData\\Local\\Temp\\Docket-Setup-1.2.1.exe" /SILENT' in cmd
+    assert cmd.startswith("cmd.exe /c ping -n 3 127.0.0.1 >nul & start")

@@ -43,15 +43,23 @@ def parse_release(body: bytes) -> dict | None:
     return data
 
 
+def installer_command(path: Path) -> str:
+    """The full cmd.exe command line that waits ~2 seconds, then starts the installer quietly.
+
+    Built as one string on purpose: handing subprocess a list makes Python escape the inner
+    quotes as \\" which cmd.exe doesn't understand, so `start` ended up looking for a file
+    called \\ (the 1.1.0 and 1.2.0 updater bug)."""
+    return (f'cmd.exe /c ping -n 3 127.0.0.1 >nul & start "" "{path}" '
+            f'/SILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS')
+
+
 def run_installer_and_quit_soon(path: Path) -> bool:
     """Start the downloaded installer quietly a couple of seconds from now, so Docket can close
     first. The installer reopens Docket when it's done."""
     if sys.platform != "win32":
         return False
-    cmd = (f'ping -n 3 127.0.0.1 >nul & start "" "{path}" '
-           f'/SILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS')
     try:
-        subprocess.Popen(["cmd", "/c", cmd], creationflags=0x08000000)   # no console window
+        subprocess.Popen(installer_command(path), creationflags=0x08000000)   # no console window
     except OSError:
         return False
     return True
