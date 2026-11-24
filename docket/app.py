@@ -1044,9 +1044,20 @@ class DocketApp(QObject):
 
     def _download_update(self, release: dict, parent: QWidget | None) -> None:
         asset = updates.pick_installer(release)
-        if asset is None or not getattr(sys, "frozen", False):
-            # Running from the Python files, or no installer attached: open the release page.
-            QDesktopServices.openUrl(QUrl(release.get("html_url") or updates.RELEASES_PAGE))
+        page = release.get("html_url") or updates.RELEASES_PAGE
+        if not getattr(sys, "frozen", False):
+            QDesktopServices.openUrl(QUrl(page))       # running from the Python files: get the code there
+            return
+        if asset is None:
+            box = QMessageBox(parent or self.main)
+            box.setWindowTitle("Update")
+            box.setText(f"Docket {release.get('tag_name', '').lstrip('vV')} doesn't have an installer attached yet, "
+                        "so it can't update itself.\n\nTry again in a little while, or open the release page.")
+            open_btn = box.addButton("Open release page", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() == open_btn:
+                QDesktopServices.openUrl(QUrl(page))
             return
         name, url = asset
         dest = updates.download_path(name)

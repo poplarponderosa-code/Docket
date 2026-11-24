@@ -209,7 +209,9 @@ class DocketWindow(QWidget):
         self.title.drag_released.connect(lambda _pos: self._end_group())
 
     def eventFilter(self, obj, ev) -> bool:
-        if obj is self.title.extra and ev.type() == QEvent.Type.MouseButtonPress and self.collapsed:
+        title = getattr(self, "title", None)          # events can arrive while the window is still being built
+        if title is not None and obj is title.extra and ev.type() == QEvent.Type.MouseButtonPress \
+                and self.collapsed:
             page = self.pill_page()
             if page is not None and page.timer_on and self._pill_top_id is not None:
                 QTimer.singleShot(0, lambda tid=self._pill_top_id: page.set_step_limit(tid))
@@ -836,8 +838,9 @@ class MainWindow(DocketWindow):
         self.tabs.tabMoved.connect(self._on_tab_moved)
         self.tabs.tabBarDoubleClicked.connect(self.start_rename)
         self.tabs.customContextMenuRequested.connect(self._tab_menu)
-        self.tabs.installEventFilter(self)
         self._drag_tid: int | None = None
+        self._rename_editor: RenameEdit | None = None
+        self.tabs.installEventFilter(self)
         tr.addWidget(self.tabs, 0, Qt.AlignmentFlag.AlignBottom)
         self.add_tab_btn = icon_button("plus", "New list (the arrow has more choices)", size=28)
         self.add_tab_btn.setFixedSize(42, 28)
@@ -976,7 +979,7 @@ class MainWindow(DocketWindow):
 
     # ---- dragging a tab out of the bar ----------------------------------------------------------
     def eventFilter(self, obj: QObject, ev: QEvent) -> bool:
-        if obj is self.tabs:
+        if obj is getattr(self, "tabs", None):       # not made yet while the window is being built
             t = ev.type()
             if t == QEvent.Type.MouseButtonPress and self._rename_editor is not None \
                     and not self._rename_editor.geometry().contains(ev.position().toPoint()):
