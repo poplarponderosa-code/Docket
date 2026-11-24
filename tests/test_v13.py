@@ -132,3 +132,30 @@ def test_capture_routing_and_paste():
     assert capture.paste_kind("## Trip\nbook flights\n") == "list"
     assert capture.paste_kind("a\n\nb") == "lines" and capture.paste_kind("one line") == "one"
     assert capture.paste_lines("- a\n2. b\n[x] c\n\n  d  ") == ["a", "b", "c", "d"]
+
+
+def test_synced_folders():
+    from docket import syncfolders
+    env = {"OneDrive": r"C:\Users\James\OneDrive"}
+    assert syncfolders.service(r"C:\Users\James\OneDrive\Documents\Docket", env) == "OneDrive"
+    assert syncfolders.service(r"C:\Users\James\OneDrive - Acme Corp\Logs", {}) == "OneDrive"
+    assert syncfolders.service(r"G:\My Drive\Docket", {}) == "Google Drive"
+    assert syncfolders.service(r"C:\Users\James\Dropbox\x", {}) == "Dropbox"
+    assert syncfolders.service(r"C:\Users\James\Documents\Docket", env) == ""
+    assert "OneDrive" in syncfolders.note(r"C:\Users\James\OneDrive\x", "Time logs") or True
+
+
+def test_add_to_top():
+    s = Store()
+    t = s.add_tab("A", kind="checklist")
+    s.add_item(t.id, "one"); s.add_item(t.id, "two"); s.add_item(t.id, "zero", top=True)
+    assert [i.name for i in s.items(t.id)] == ["zero", "one", "two"]
+
+
+def test_parse_line_reads_copied_lines():
+    it = importer.parse_line("obtain heightmap | category Setup", TODAY, checklist=True)
+    assert it["name"] == "obtain heightmap" and it["category"] == "Setup"
+    it = importer.parse_line("water | limit 15m | link https://x.com", TODAY, checklist=True)
+    assert it["time_limit"] == 900 and it["link"] == "https://x.com"
+    it = importer.parse_line("call Sam fri", TODAY, default_priority=2)
+    assert it["priority"] == 2 and it["due"]

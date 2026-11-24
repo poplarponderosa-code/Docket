@@ -320,19 +320,21 @@ class Store:
 
     def add_item(self, tab_id: int, name: str, due: str = "", end: str = "", priority: int = 1,
                  notes: str = "", reminder: bool = False, done: bool = False,
-                 remind_time: str = "", link: str = "", category: str = "") -> Item:
+                 remind_time: str = "", link: str = "", category: str = "", time_limit: int = 0,
+                 top: bool = False) -> Item:
         item_id = self._insert_item(tab_id, dict(name=name, due=due, end=end, priority=priority, notes=notes,
                                                  reminder=reminder, done=done, remind_time=remind_time,
-                                                 link=link, category=category))
+                                                 link=link, category=category, time_limit=time_limit), top=top)
         self._emit(tab_id)
         return self.item(item_id)
 
-    def _insert_item(self, tab_id: int, it: dict) -> int:
+    def _insert_item(self, tab_id: int, it: dict, top: bool = False) -> int:
         due, end = it.get("due", "") or "", it.get("end", "") or ""
         if end and (not due or end <= due):
             end = ""
-        pos = self.db.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM items WHERE tab_id = ?",
-                              (tab_id,)).fetchone()[0]
+        sql = ("SELECT COALESCE(MIN(position), 1) - 1 FROM items WHERE tab_id = ?" if top
+               else "SELECT COALESCE(MAX(position), 0) + 1 FROM items WHERE tab_id = ?")
+        pos = self.db.execute(sql, (tab_id,)).fetchone()[0]
         cur = self.db.execute(
             "INSERT INTO items (tab_id, name, due, end_date, priority, notes, reminder, remind_time, done, created,"
             " position, time_limit, category, link) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

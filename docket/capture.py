@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-INBOX = "Inbox"
+INBOX = "Quick capture"
 
 
 def route(text: str, list_names: list[str]) -> tuple[str, str | None]:

@@ -29,6 +29,33 @@ def _hint(text: str) -> QLabel:
     return label
 
 
+def install_companion(app: "DocketApp", comp: companions.Companion, release: dict | None, parent: QWidget) -> None:
+    """Download a companion's latest installer from its GitHub release and run it normally."""
+    asset = updates.pick_installer(release) if release else None
+    if asset is None:
+        QDesktopServices.openUrl(QUrl(comp.releases_url))
+        return
+    name, url = asset
+    dest = updates.download_path(name)
+    progress = QProgressDialog(f"Downloading {comp.full_name}…", "Cancel", 0, 100, parent)
+    progress.setWindowTitle(comp.full_name)
+    progress.setMinimumDuration(0)
+    progress.canceled.connect(app.updater.cancel)
+
+    def on_progress(received: int, total: int) -> None:
+        if total > 0:
+            progress.setValue(int(received * 100 / total))
+
+    def on_done(path, error) -> None:
+        progress.close()
+        if path is None or not companions.run_installer(path):
+            if error and "cancel" in error.lower():
+                return
+            QDesktopServices.openUrl(QUrl(comp.releases_url))
+
+    app.updater.download(url, dest, on_progress, on_done)
+
+
 class CompanionChip(QFrame):
     """A companion app under a mode: its name and an ⓘ with what it does."""
 
@@ -191,6 +218,29 @@ class SetupDialog(QDialog):
         b.clicked.connect(lambda: self._pick(self.backup_edit, "Choose a backup folder"))
         row.addWidget(b)
         v.addLayout(row)
+        self.backup_note = _hint("")
+        v.addWidget(self.backup_note)
+        self.backup_edit.textChanged.connect(self._sync_notes)
+
+        self.tpl_box = QWidget()
+        tv = QVBoxLayout(self.tpl_box)
+        tv.setContentsMargins(0, 0, 0, 0)
+        tv.setSpacing(6)
+        sec = QLabel("TEMPLATES FOLDER")
+        sec.setObjectName("Section")
+        tv.addWidget(sec)
+        tv.addWidget(_hint("Checklist templates are saved here as plain text files you can share."))
+        row = QHBoxLayout()
+        self.tpl_edit = QLineEdit(str(self.app.templates_dir()))
+        row.addWidget(self.tpl_edit, 1)
+        b = QPushButton("Change…")
+        b.clicked.connect(lambda: self._pick(self.tpl_edit, "Choose a templates folder"))
+        row.addWidget(b)
+        tv.addLayout(row)
+        self.tpl_note = _hint("")
+        tv.addWidget(self.tpl_note)
+        self.tpl_edit.textChanged.connect(self._sync_notes)
+        v.addWidget(self.tpl_box)
 
         self.logs_box = QWidget()
         lv = QVBoxLayout(self.logs_box)
@@ -208,6 +258,9 @@ class SetupDialog(QDialog):
         b.clicked.connect(lambda: self._pick(self.logs_edit, "Choose a folder for time logs"))
         row.addWidget(b)
         lv.addLayout(row)
+        self.logs_note = _hint("")
+        lv.addWidget(self.logs_note)
+        self.logs_edit.textChanged.connect(self._sync_notes)
         v.addWidget(self.logs_box)
 
         sec = QLabel("GENERAL")
@@ -264,8 +317,19 @@ class SetupDialog(QDialog):
         path = QFileDialog.getExistingDirectory(self, title, edit.text())
         if path:
             edit.setText(path)
-            if edit is self.backup_edit and not self.app.settings.get("timelog_dir"):
-                self.logs_edit.setText(str(Path(path) / "Time logs"))
+            if edit is self.backup_edit:
+                if not self.app.settings.get("timelog_dir"):
+                    self.logs_edit.setText(str(Path(path) / "Time logs"))
+                if not self.app.settings.get("templates_dir"):
+                    self.tpl_edit.setText(str(Path(path) / "Templates"))
+
+    def _sync_notes(self) -> None:
+        from .. import syncfolders
+        for label, edit, what in ((self.backup_note, self.backup_edit, "Your lists"),
+                                  (self.tpl_note, self.tpl_edit, "Your templates"),
+                                  (self.logs_note, self.logs_edit, "Time logs")):
+            label.setText(syncfolders.note(edit.text(), what))
+            label.setVisible(bool(label.text()))
 
     # ---- moving between pages --------------------------------------------------------------
     def _go(self, index: int) -> None:
@@ -277,6 +341,8 @@ class SetupDialog(QDialog):
         if on_setup:
             mode = self.chosen_mode()
             self.logs_box.setVisible(modes.has(mode, "timelogs"))
+            self.tpl_box.setVisible(modes.has(mode, "templates"))
+            self._sync_notes()
             self._sync_companions()
 
     def _next(self) -> None:
@@ -294,9 +360,14 @@ class SetupDialog(QDialog):
             logs = self.logs_edit.text().strip()
             if logs and modes.has(self.chosen_mode(), "timelogs") and Path(logs) != app.timelog_dir():
                 app.set_setting("timelog_dir", logs)
+            tpl = self.tpl_edit.text().strip()
+            if tpl and modes.has(self.chosen_mode(), "templates") and Path(tpl) != app.templates_dir():
+                app.set_setting("templates_dir", tpl)
             app.set_setting("startup", self.startup_box.isChecked())
         app.set_setting("mode", self.chosen_mode())
         app.set_setting("setup_done", True)
+        if save_page_two:
+            QTimer.singleShot(300, lambda: app.warn_synced_logs())
         self.accept()
 
     def reject(self) -> None:
@@ -341,27 +412,96 @@ class SetupDialog(QDialog):
             state.setText("Installed ✓" if installed else "")
 
     def _install(self, comp: companions.Companion) -> None:
-        release = self.available.get(comp.key)
-        asset = updates.pick_installer(release) if release else None
-        if asset is None:
-            QDesktopServices.openUrl(QUrl(comp.releases_url))
-            return
-        name, url = asset
-        dest = updates.download_path(name)
-        progress = QProgressDialog(f"Downloading {comp.full_name}…", "Cancel", 0, 100, self)
-        progress.setWindowTitle(comp.full_name)
-        progress.setMinimumDuration(0)
-        progress.canceled.connect(self.app.updater.cancel)
+        install_companion(self.app, comp, self.available.get(comp.key), self)
 
-        def on_progress(received: int, total: int) -> None:
-            if total > 0:
-                progress.setValue(int(received * 100 / total))
 
-        def on_done(path, error) -> None:
-            progress.close()
-            if path is None or not companions.run_installer(path):
-                if error and "cancel" in error.lower():
-                    return
-                QDesktopServices.openUrl(QUrl(comp.releases_url))
+class CompanionsDialog(QDialog):
+    """Settings › About › Companion apps…: the apps that suit this mode, to install or open.
+    Only apps with a published release (or already installed) are listed."""
 
-        self.app.updater.download(url, dest, on_progress, on_done)
+    def __init__(self, app: "DocketApp", parent: QWidget | None = None):
+        super().__init__(parent)
+        self.app = app
+        self.setObjectName("Settings")
+        self.setWindowTitle("Companion apps")
+        self.resize(480, 300)
+        self.releases: dict[str, dict] = {}
+        self.rows: dict[str, tuple[QWidget, QPushButton, QLabel]] = {}
+        self.comps = companions.for_mode(app.mode())
+        self._pending = len(self.comps)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(20, 16, 20, 14)
+        v.setSpacing(10)
+        title = QLabel("Companion apps")
+        title.setObjectName("SetupTitle")
+        v.addWidget(title)
+        v.addWidget(_hint("Free, optional apps that work alongside Docket. Each one's installer runs normally, "
+                          "so you can see what it does."))
+        for comp in self.comps:
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+            text = QLabel(f"<b>{comp.full_name}</b><br>{comp.description}")
+            text.setWordWrap(True)
+            h.addWidget(text, 1)
+            info = icon_button("info", f"What {comp.name} does", size=26)
+            info.clicked.connect(lambda _=False, c=comp: CompanionChip._info(self, c))
+            h.addWidget(info)
+            state = QLabel()
+            state.setObjectName("Hint")
+            h.addWidget(state)
+            btn = QPushButton("Install")
+            btn.clicked.connect(lambda _=False, c=comp: self._act(c))
+            h.addWidget(btn)
+            row.hide()
+            v.addWidget(row)
+            self.rows[comp.key] = (row, btn, state)
+        self.status = _hint("Checking which companion apps are available…" if self.comps
+                            else "No companion apps go with this mode yet.")
+        v.addWidget(self.status)
+        v.addStretch(1)
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        close = QPushButton("Close")
+        close.setProperty("primary", True)
+        close.clicked.connect(self.accept)
+        bottom.addWidget(close)
+        v.addLayout(bottom)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(3000)
+        self._timer.timeout.connect(self._sync)
+        self._timer.start()
+        self._sync()
+        for comp in self.comps:
+            app.updater.check(lambda release, _err, c=comp: self._found(c, release), comp.api_latest)
+
+    def _found(self, comp: companions.Companion, release: dict | None) -> None:
+        self._pending -= 1
+        if release is not None:
+            self.releases[comp.key] = release
+        self._sync()
+
+    def _sync(self) -> None:
+        shown = 0
+        for comp in self.comps:
+            row, btn, state = self.rows[comp.key]
+            installed = companions.find(comp) is not None
+            visible = installed or comp.key in self.releases
+            row.setVisible(visible)
+            shown += visible
+            btn.setText("Open" if installed else "Install")
+            state.setText("Installed ✓" if installed else "")
+        if shown:
+            self.status.hide()
+        elif self._pending <= 0:
+            self.status.setText("None of the companion apps are released yet. They'll appear here as soon as "
+                                "they are.")
+            self.status.show()
+
+    def _act(self, comp: companions.Companion) -> None:
+        if companions.find(comp) is not None:
+            self.app.open_companion(comp.key)
+        else:
+            install_companion(self.app, comp, self.releases.get(comp.key), self)

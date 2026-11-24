@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QLi
                                QPushButton, QSizeGrip, QStackedWidget, QStyle, QStyleOptionTab, QStylePainter,
                                QTabBar, QToolButton, QVBoxLayout, QWidget)
 
-from .. import dates, links, system, themes
+from .. import dates, links, themes
 from ..geometry import snap, touching_group
 from ..store import Item
 from .common import (SIDE_EDGES, WM_NCLBUTTONDBLCLK, ClickableWidget, ElideLabel, TitleBar, edge_hit_test,
@@ -146,9 +146,17 @@ class DocketWindow(QWidget):
     pin_btn: QToolButton
 
     def __init__(self, app: "DocketApp", flags, pill_key: str, min_size: QSize):
-        if app.settings.get("alt_tab", True):        # a normal window shows in Alt+Tab; its taskbar button
-            flags = Qt.WindowType.Window             # is taken off again each time it's shown
-        super().__init__(None, flags | FRAMELESS)
+        # Alt+Tab without a taskbar button: a normal window owned by a hidden window. Windows gives owned
+        # windows no taskbar button but still lists them in Alt+Tab. Pills stay tool windows (never listed).
+        hidden_owner = QWidget()
+        hidden_owner.setWindowTitle("Docket")
+        hidden_owner.winId()                     # its native window has to exist to own this one
+        owner = None
+        if app.settings.get("alt_tab", True):
+            flags = Qt.WindowType.Window
+            owner = hidden_owner
+        super().__init__(owner, flags | FRAMELESS)
+        self._owner = hidden_owner               # kept for switching later (set only after Qt's __init__)
         self._drag_group: list | None = None
         self._pill_count = 0                     # items a wrapping pill shows (0 = from the settings)
         self.app = app
@@ -408,9 +416,7 @@ class DocketWindow(QWidget):
         if not self._rounded:
             round_corners(self)
             self._rounded = True
-        if self.windowType() != Qt.WindowType.Tool:
-            QTimer.singleShot(0, lambda: system.hide_taskbar_button(int(self.winId())))
-            QTimer.singleShot(400, lambda: system.hide_taskbar_button(int(self.winId())))
+
 
     def enterEvent(self, e) -> None:
         super().enterEvent(e)
@@ -441,7 +447,7 @@ class DocketWindow(QWidget):
         if on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         geo = self.geometry()
-        self.setWindowFlags(flags)
+        self.setParent(None if want_tool else self._owner, flags)
         self._rounded = False          # Windows makes a new native window
         if visible:
             self.setGeometry(geo)

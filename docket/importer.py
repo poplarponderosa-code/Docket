@@ -21,8 +21,8 @@ BULLET_RE = re.compile(r"^(?:[-*•]|\d+[.)])\s+")
 TRUE_WORDS = {"x", "yes", "y", "true", "1", "done", "✓", "complete", "completed"}
 
 
-def _new_item(name: str = "") -> dict:
-    return {"name": name, "due": "", "end": "", "priority": 1, "notes": "",
+def _new_item(name: str = "", priority: int = 1) -> dict:
+    return {"name": name, "due": "", "end": "", "priority": priority, "notes": "",
             "reminder": False, "remind_time": "", "done": False, "time_limit": 0, "category": "",
             "link": ""}
 
@@ -43,7 +43,9 @@ def _set_dates(item: dict, text: str, today: dt.date) -> bool:
     return True
 
 
-def parse_line(line: str, today: dt.date, checklist: bool = False) -> dict | None:
+def parse_line(line: str, today: dt.date, checklist: bool = False, default_priority: int = 1) -> dict | None:
+    """One typed, pasted or imported line: the simple style (dates and !priority at the end) or the
+    column style (name | due | priority | category … | link … | limit …)."""
     s = line.strip()
     done = False
     m = CHECK_RE.match(s)
@@ -60,13 +62,13 @@ def parse_line(line: str, today: dt.date, checklist: bool = False) -> dict | Non
 
     if checklist and "|" not in s:
         s, link = take_link(s)       # checklist steps are taken as written: no dates
-        item = _new_item(s or link)
+        item = _new_item(s or link, default_priority)
         item["link"] = link
         item["done"] = done
         return item
     if "|" in s:
         parts = [p.strip() for p in s.split("|")]
-        item = _new_item(parts[0])
+        item = _new_item(parts[0], default_priority)
         for field in parts[1:]:
             low = field.lower()
             if not low:
@@ -103,7 +105,7 @@ def parse_line(line: str, today: dt.date, checklist: bool = False) -> dict | Non
             return None
     else:
         q = parse_quick_add(s, today)
-        item = _new_item(q.name or s)
+        item = _new_item(q.name or q.link or s, default_priority)
         if q.due:
             item["due"] = q.due.isoformat()
             item["end"] = q.end.isoformat() if q.end else ""

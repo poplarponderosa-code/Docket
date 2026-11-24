@@ -4,8 +4,8 @@ from __future__ import annotations
 import sys
 
 from PySide6.QtCore import QDate, QPoint, QSize, Qt, Signal
-from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import (QApplication, QCheckBox, QDateEdit, QHBoxLayout, QLabel, QSizePolicy,
+from PySide6.QtGui import QMouseEvent, QTextCursor
+from PySide6.QtWidgets import (QApplication, QCheckBox, QDateEdit, QHBoxLayout, QLabel, QPlainTextEdit, QSizePolicy,
                                QWidget)
 
 NONE_DATE = QDate(2000, 1, 1)
@@ -132,6 +132,84 @@ class ElideLabel(QLabel):
         shown = self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight, width)
         super().setText(shown)
         self.setToolTip(self._full if shown != self._full else "")
+
+
+class GrowEdit(QPlainTextEdit):
+    """A text box that wraps long text and grows taller as you type (one line to start).
+
+    Single-line kind (the default): Enter emits submitted(modifiers) instead of a new line, and
+    pasted line breaks become spaces, unless on_paste is set to take a multi-line paste instead.
+    Multi-line kind (notes): Enter makes a new line as usual."""
+
+    submitted = Signal(object)        # the keyboard modifiers held with Enter
+    editingFinished = Signal()
+
+    def __init__(self, text: str = "", max_lines: int = 6, multiline: bool = False,
+                 parent: QWidget | None = None):
+        super().__init__()
+        if parent is not None:
+            self.setParent(parent)
+        self.max_lines = max_lines
+        self.multiline = multiline
+        self.on_paste = None
+        self.setTabChangesFocus(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        if text:
+            self.setPlainText(text)
+        self.textChanged.connect(self._fit)
+        self._fit()
+
+    # QLineEdit-style names, so it drops in where a QLineEdit was
+    def text(self) -> str:
+        text = self.toPlainText() or ""
+        return text if self.multiline else text.replace("\n", " ")
+
+    def setText(self, text: str) -> None:
+        self.setPlainText(text or "")
+        self.moveCursor(QTextCursor.MoveOperation.End)
+
+    def insert(self, text: str) -> None:
+        self.insertPlainText(text)
+
+    def keyPressEvent(self, e) -> None:
+        if not self.multiline and e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.submitted.emit(e.modifiers())
+            e.accept()
+            return
+        super().keyPressEvent(e)
+
+    def insertFromMimeData(self, source) -> None:
+        text = source.text() if source is not None else ""
+        if not self.multiline:
+            if self.on_paste is not None and len([x for x in text.splitlines() if x.strip()]) > 1:
+                self.on_paste(text)
+                return
+            self.insertPlainText(" ".join(text.split()))
+            return
+        super().insertFromMimeData(source)
+
+    def focusOutEvent(self, e) -> None:
+        super().focusOutEvent(e)
+        self.editingFinished.emit()
+
+    def resizeEvent(self, e) -> None:
+        super().resizeEvent(e)
+        self._fit()
+
+    def _fit(self) -> None:
+        fm = self.fontMetrics()
+        margin = int(self.document().documentMargin()) * 2 + self.frameWidth() * 2 + 6
+        width = max(40, self.viewport().width() - int(self.document().documentMargin()) * 2)
+        text = self.toPlainText() or "X"
+        flags = int(Qt.TextFlag.TextWordWrap) | int(Qt.AlignmentFlag.AlignLeft)
+        lines_h = fm.boundingRect(0, 0, width, 100_000, flags, text + ("X" if text.endswith("\n") else "")).height()
+        one = fm.lineSpacing()
+        height = min(max(one, lines_h), one * self.max_lines) + margin
+        if self.height() != height:
+            self.setFixedHeight(height)
 
 
 class ClickLabel(QLabel):

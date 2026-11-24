@@ -4,6 +4,21 @@ A small, quiet to-do window for Windows 11: lists as tabs, each either a priorit
 (due date, item, priority, notes) or a checklist (steps in order), soft colour themes,
 reminders, and plain-text backups you can keep in OneDrive or Google Drive.
 
+## New in 1.3.2
+
+* A tick box in each list's header ticks every item (click again to untick them all).
+* Checklists: drag Step, Category and Time into any order, or hide Category or Time (Settings > Lists).
+* New items can go to the top of checklists (Settings > Lists); Ctrl+Enter adds to the other end once.
+* Quick capture's own list is called "Quick capture" and can be renamed freely. Lines like
+  `water | category Terrain` (from Copy list) keep their category when typed or pasted anywhere.
+* The add boxes, the item name box and notes wrap and grow as you type. Enter in an item's name saves
+  it and closes the item. Notes start as one line.
+* The list's ⓘ box has the client label (Pro). Setup asks for the templates folder (Advanced and Pro),
+  and notes when a folder syncs to OneDrive, Google Drive or Dropbox.
+* Alt+Tab now uses a different method that should list Docket reliably; Settings stays in front when
+  you change keep-on-top; Companion apps has its own window; turning off CSV copies warns about Ledger;
+  quitting with unsaved changes and auto-backup off offers a backup.
+
 ## New in 1.3.0
 
 * **Basic, Advanced and Pro modes.** Docket asks which you'd like the first time it opens (all free;
@@ -14,7 +29,7 @@ reminders, and plain-text backups you can keep in OneDrive or Google Drive.
   lists the companion apps you can install.
 * **Settings in tabs** across the top: General, Appearance, Lists, Timer, Shortcuts, Backup, About.
 * **Quick capture** (F16): a small box at the top of the screen you're on. Enter adds, Shift+Enter adds
-  another, Esc closes. Items go to an Inbox list unless you press Tab to pick one or type `#listname`.
+  another, Esc closes. Items go to a "Quick capture" list unless you press Tab to pick one or type `#listname`.
   Paste several lines to add them all, or paste text starting with `## Name` to make a new list.
   The microphone starts Windows voice typing (Win+H).
 * **Item links**: a web address, folder or file on any item (open the item, or type a web address in

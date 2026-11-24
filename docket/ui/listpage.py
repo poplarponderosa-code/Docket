@@ -15,7 +15,7 @@ from .. import dates, links, themes
 from ..parser import parse_quick_add, take_link
 from ..timer import fmt_duration, fmt_limit, parse_duration
 from ..store import PRIORITIES, Item
-from .common import ClickableWidget, ClickLabel, ElideLabel, OptionalDateEdit, repolish, set_prop
+from .common import ClickableWidget, ClickLabel, ElideLabel, GrowEdit, OptionalDateEdit, repolish, set_prop
 from .icons import dot_icon, icon_button, make_icon, set_icon_name
 
 if TYPE_CHECKING:
@@ -210,13 +210,27 @@ class DescriptionPopup(QFrame):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 12, 12, 12)
         lay.setSpacing(8)
-        title = QLabel(f"Description: {tab.name if tab else ''}")
+        title = QLabel(f"About “{tab.name if tab else ''}”")
         title.setObjectName("FieldLabel")
         lay.addWidget(title)
         self.edit = QPlainTextEdit(tab.description if tab else "")
         self.edit.setPlaceholderText("What this list is for, links, reminders to yourself…")
         self.edit.setFixedHeight(130)
         lay.addWidget(self.edit)
+        self.client_edit = None
+        if tab is not None and tab.is_checklist and app.has("client"):
+            lab = QLabel("Client")
+            lab.setObjectName("FieldLabel")
+            lay.addWidget(lab)
+            self.client_edit = QLineEdit(tab.client)
+            self.client_edit.setPlaceholderText("A short label, like Acme (optional)")
+            self.client_edit.setMaxLength(60)
+            lay.addWidget(self.client_edit)
+            tip = QLabel("Goes into the time log so Ledger knows the client; their details stay in Ledger. "
+                         "Use this instead of putting client names in the checklist title.")
+            tip.setObjectName("Hint")
+            tip.setWordWrap(True)
+            lay.addWidget(tip)
         row = QHBoxLayout()
         hint = QLabel("Saved with the list, its exports and templates.")
         hint.setObjectName("Hint")
@@ -233,6 +247,10 @@ class DescriptionPopup(QFrame):
         text = self.edit.toPlainText().strip()
         if tab is not None and text != tab.description:
             self.app.store.update_tab(self.tab_id, description=text)
+        if tab is not None and self.client_edit is not None:
+            client = " ".join(self.client_edit.text().split())
+            if client != tab.client:
+                self.app.store.update_tab(self.tab_id, client=client)
         super().closeEvent(e)
 
     def show_under(self, anchor: QWidget) -> None:
@@ -412,9 +430,9 @@ class ItemRow(QFrame):
         self.time_lbl = None
         self.cat_lbl = None
         if self.checklist:                 # steps only: no dates, no priority
-            top.addWidget(self.name_cell, 1)
             self.due.hide()
             self.pri.hide()
+            cells: dict[str, list] = {"step": [(self.name_cell, 1)], "category": [], "time": []}
             if page.show_category:
                 self.cat_lbl = ElideLabel(item.category)
                 self.cat_lbl.setObjectName("CategoryCell")
@@ -422,8 +440,8 @@ class ItemRow(QFrame):
                 self.cat_lbl.clickable = True
                 self.cat_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
                 self.cat_lbl.clicked.connect(self._category_menu)
-                top.addWidget(self.cat_lbl)
-            if page.timer_on:
+                cells["category"].append((self.cat_lbl, 0))
+            if page.timer_on and page.show_time:
                 self.play_btn = icon_button("play", "Time this step", size=PLAY_W)
                 keep = self.play_btn.sizePolicy()
                 keep.setRetainSizeWhenHidden(True)
@@ -437,8 +455,10 @@ class ItemRow(QFrame):
                 self.time_lbl.setObjectName("TimeCell")
                 self.time_lbl.setFixedWidth(TIME_W)
                 self.time_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                top.addWidget(self.play_btn)
-                top.addWidget(self.time_lbl)
+                cells["time"] += [(self.play_btn, 0), (self.time_lbl, 0)]
+            for key in page.checklist_columns():
+                for w, stretch in cells[key]:
+                    top.addWidget(w, stretch)
         else:
             cells = {"due": self.due, "item": self.name_cell, "pri": self.pri}
             for key in page.visible_columns():
@@ -531,13 +551,13 @@ class ItemRow(QFrame):
         v = QVBoxLayout(panel)
         v.setContentsMargins(12 + CHECK_W + 8, 0, 12, 12)
         v.setSpacing(8)
-        self.name_edit = QLineEdit(it.name)
+        self.name_edit = GrowEdit(it.name, max_lines=5)
         self.name_edit.setPlaceholderText("Step" if self.checklist else "Item name")
         self.name_edit.editingFinished.connect(self._save_name)
+        self.name_edit.submitted.connect(lambda _m: self._name_entered())
         v.addWidget(self.name_edit)
-        self.notes_edit = QPlainTextEdit(it.notes)
+        self.notes_edit = GrowEdit(it.notes, max_lines=8, multiline=True)
         self.notes_edit.setPlaceholderText("Notes…")
-        self.notes_edit.setFixedHeight(76)
         self.notes_edit.textChanged.connect(self._notes_timer.start)
         v.addWidget(self.notes_edit)
         link_row = QHBoxLayout()
@@ -730,6 +750,12 @@ class ItemRow(QFrame):
         self.flush()
         self.app.store.update_item(self.item.id, priority=(self.item.priority + 1) % 3)
 
+    def _name_entered(self) -> None:
+        """Enter in the name box: save it and close the item."""
+        self._save_name()
+        if self.item.id in self.page.expanded:
+            self.toggle()
+
     def _save_name(self) -> None:
         if self.panel is None:
             return
@@ -893,9 +919,10 @@ class ListPage(QWidget):
         bar = QHBoxLayout()
         bar.setContentsMargins(12, 10, 12, 2)
         bar.setSpacing(6)
-        self.input = QLineEdit()
+        self.input = GrowEdit(max_lines=4)
         self.input.setPlaceholderText("Add an item… try “dentist fri 3pm !high”")
-        self.input.returnPressed.connect(self.add_item)
+        self.input.setToolTip("Enter adds it. Ctrl+Enter adds it to the other end of the list.")
+        self.input.submitted.connect(self._entered)
         self.input.textChanged.connect(self._update_preview)
         self.date_btn = QPushButton("Date")
         self.date_btn.setProperty("iconName", "calendar")
@@ -915,9 +942,9 @@ class ListPage(QWidget):
         repolish(add)
         add.clicked.connect(self.add_item)
         bar.addWidget(self.input, 1)
-        bar.addWidget(self.date_btn)
-        bar.addWidget(self.pri_box)
-        bar.addWidget(add)
+        bar.addWidget(self.date_btn, 0, Qt.AlignmentFlag.AlignTop)
+        bar.addWidget(self.pri_box, 0, Qt.AlignmentFlag.AlignTop)
+        bar.addWidget(add, 0, Qt.AlignmentFlag.AlignTop)
         v.addLayout(bar)
 
         self.preview_row = QWidget()
@@ -1021,6 +1048,19 @@ class ListPage(QWidget):
     def categories_on(self) -> bool:
         return self.app.has("categories")
 
+    @property
+    def show_time(self) -> bool:
+        """The Time column (the timer keeps running and the pill shows it even when it's hidden)."""
+        return not self.app.settings.get("hide_time", False)
+
+    def checklist_columns(self) -> list[str]:
+        order = [c for c in self.app.settings.get("check_cols", ["step", "category", "time"])
+                 if c in ("step", "category", "time")]
+        for c in ("step", "category", "time"):
+            if c not in order:
+                order.append(c)
+        return order
+
     def time_text(self, item: Item, pill: bool = False) -> tuple[str, str, str]:
         """(text, status, tooltip) for a step's Time cell. On a pill, a step that hasn't started
         and has no limit shows nothing (in the list it shows a dash you can click)."""
@@ -1110,7 +1150,8 @@ class ListPage(QWidget):
     @property
     def show_category(self) -> bool:
         tab = self.app.store.tab(self.tab_id)
-        return bool(tab and tab.is_checklist and tab.show_category and self.categories_on)
+        return bool(tab and tab.is_checklist and tab.show_category and self.categories_on
+                    and not self.app.settings.get("hide_category", False))
 
     def categories(self) -> list[str]:
         tab = self.app.store.tab(self.tab_id)
@@ -1174,6 +1215,9 @@ class ListPage(QWidget):
             if self.app.has("timer"):
                 menu.addAction("Turn the timer off" if self.timer_on else "Use a timer",
                                lambda: self.app.set_timer_on(self.tab_id, not self.timer_on))
+                if self.timer_on:
+                    menu.addAction("Show the Time column" if not self.show_time else "Hide the Time column",
+                                   lambda: self.app.set_setting("hide_time", self.show_time))
             menu.addAction("Switch to priority list", lambda: self.app.store.set_tab_kind(self.tab_id, "list"))
         else:
             hidden = bool(self.app.settings.get("hide_pri"))
@@ -1196,9 +1240,14 @@ class ListPage(QWidget):
                 w.deleteLater()
         lay.setContentsMargins(12, 0, 8, 0)
         lay.setSpacing(8)
-        spacer = QWidget()
-        spacer.setFixedWidth(CHECK_W)
-        lay.addWidget(spacer)
+        items = self.app.store.items(self.tab_id)
+        self.check_all = QCheckBox()
+        self.check_all.setFixedWidth(CHECK_W)
+        self.check_all.setEnabled(bool(items))
+        self.check_all.setChecked(bool(items) and all(i.done for i in items))
+        self.check_all.setToolTip("Untick everything" if self.check_all.isChecked() else "Tick everything")
+        self.check_all.clicked.connect(lambda on: QTimer.singleShot(0, lambda: self.app.tick_all(self.tab_id, on)))
+        lay.addWidget(self.check_all)
         tab = self.app.store.tab(self.tab_id)
         self.desc_btn = icon_button("info", "Description", size=CHEV_W)
         has_desc = bool(tab and tab.description.strip())
@@ -1208,21 +1257,21 @@ class ListPage(QWidget):
                                  else "Add a description for this list")
         self.desc_btn.clicked.connect(self.edit_description)
         if self.is_checklist:
+            groups: dict[str, list] = {"step": [], "category": [], "time": []}
             label = QLabel("STEP")
             label.setObjectName("HeaderLabel")
-            lay.addWidget(label, 1)
             self.progress_label = QLabel()
             self.progress_label.setObjectName("HeaderLabel")
-            lay.addWidget(self.progress_label)
+            groups["step"] += [(label, 1), (self.progress_label, 0)]
             if self.show_category:
                 cat = QLabel("CATEGORY")
                 cat.setObjectName("HeaderLabel")
                 cat.setFixedWidth(CAT_W)
-                lay.addWidget(cat)
+                groups["category"].append((cat, 0))
             if tab is not None and self.timer_on and tab.timer_finished and self.app.has("ledger"):
                 ledger = icon_button("ledger", "Make a PDF of this time log in Ledger", role="accent", size=PLAY_W)
                 ledger.clicked.connect(lambda: self.app.make_pdf(self.tab_id))
-                lay.addWidget(ledger)
+                groups["time"].append((ledger, 0))
             if self.timer_on:
                 self.head_play = icon_button("play", "Start the timer", size=PLAY_W)
                 self.head_play.clicked.connect(lambda: self.app.toggle_timer(self.tab_id))
@@ -1231,8 +1280,11 @@ class ListPage(QWidget):
                 self.total_btn.setFixedWidth(TIME_W)
                 self.total_btn.setCursor(Qt.CursorShape.PointingHandCursor)
                 self.total_btn.clicked.connect(self._set_total_limit)
-                lay.addWidget(self.head_play)
-                lay.addWidget(self.total_btn)
+                if self.show_time:
+                    groups["time"] += [(self.head_play, 0), (self.total_btn, 0)]
+            for key in self.checklist_columns():
+                for w, stretch in groups[key]:
+                    lay.addWidget(w, stretch)
             lay.addWidget(self.desc_btn)
             self._update_progress()
             self.update_times()
@@ -1388,25 +1440,18 @@ class ListPage(QWidget):
             set_prop(self.date_btn, "on", False)
         set_icon_name(self.date_btn, "calendar")
 
-    def add_item(self) -> None:
+    def _entered(self, modifiers) -> None:
+        flip = bool(modifiers & Qt.KeyboardModifier.ControlModifier) if modifiers is not None else False
+        self.add_item(flip)
+
+    def add_item(self, flip: bool = False) -> None:
         text = self.input.text().strip()
         if not text:
             self.input.setFocus()
             return
-        if self.is_checklist:
-            name, link = take_link(text)
-            self.app.store.add_item(self.tab_id, name or link, link=link)
-            self.input.clear()
-            self.input.setFocus()
-            return
-        q = parse_quick_add(text, dt.date.today())
-        if q.due:
-            due, end = q.due.isoformat(), (q.end.isoformat() if q.end else "")
-        else:
-            due, end = self.draft_due, self.draft_end
-        priority = PRIORITIES.index(q.priority) if q.priority else self.pri_box.currentIndex()
-        self.app.store.add_item(self.tab_id, q.name or q.link or text, due=due, end=end, priority=priority,
-                                reminder=bool(q.remind_time), remind_time=q.remind_time or "", link=q.link)
+        top = self.app.new_items_on_top(flip) if self.is_checklist else False
+        self.app.add_typed(self.tab_id, text, top=top, due=self.draft_due, end=self.draft_end,
+                           priority=self.pri_box.currentIndex() if not self.is_checklist else 1)
         self.input.clear()
         self.draft_due = self.draft_end = ""
         self.pri_box.setCurrentIndex(1)

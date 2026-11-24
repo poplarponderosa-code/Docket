@@ -86,6 +86,9 @@ DEFAULTS = {
     "hotkey_capture": "F16", "capture_target": "inbox", "capture_list": None,
     "capture_fullscreen": "ignore", "last_capture_tab": None,
     "clear_logs_n": 3, "clear_logs_unit": "months",
+    # 1.3.2
+    "new_item_pos": "bottom", "check_cols": ["step", "category", "time"], "hide_time": False,
+    "hide_category": False, "capture_inbox_id": None, "synced_logs_warned": "",
 }
 
 
@@ -185,7 +188,7 @@ class DocketApp(QObject):
         menu.addAction("Back up now", lambda: self.backup_now(manual=True))
         menu.addAction("Settings", self.open_settings)
         menu.addSeparator()
-        menu.addAction("Quit Docket", self.quit)
+        menu.addAction("Quit Docket", lambda: self.quit())
         self._tray_menu = menu
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._tray_activated)
@@ -313,6 +316,12 @@ class DocketApp(QObject):
             for w in self.all_windows():
                 w.apply_tint()
                 w.update_pill()
+        elif key in ("check_cols", "hide_time", "hide_category"):
+            for page in self.pages():
+                page.columns_changed()
+            if self.settings_dialog is not None:
+                dialog = self.settings_dialog
+                QTimer.singleShot(0, lambda: dialog.sync_columns())
         elif key in ("wrap_items", "show_links"):
             for page in self.pages():
                 page.refresh()
@@ -326,6 +335,7 @@ class DocketApp(QObject):
         elif key == "alt_tab":
             for w in self.all_windows():
                 w.apply_window_flags()
+            self._raise_dialogs()
         elif key in ("backup", "backup_dir", "backup_freq"):
             self.main.update_footer()
             if key == "backup" and value:
@@ -381,11 +391,14 @@ class DocketApp(QObject):
         dialog.raise_()
         dialog.activateWindow()
 
-    def show_companions(self) -> None:
-        """Companion apps for this mode, with Install buttons: the setup window's second page."""
-        self.show_setup()
-        if self.setup_dialog is not None:
-            self.setup_dialog._go(1)
+    def show_companions(self, parent: QWidget | None = None) -> None:
+        """Companion apps for this mode, with Install (or Open) buttons, in their own small window."""
+        from .ui.setup import CompanionsDialog
+        dialog = CompanionsDialog(self, parent or self.settings_dialog or self.main)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def pages(self):
         yield from self.main.pages.values()
@@ -420,6 +433,14 @@ class DocketApp(QObject):
         for w in [self.main, *self.popouts.values()]:
             w.set_on_top(w.wants_on_top())
             w.sync_pin()
+        self._raise_dialogs()
+
+    def _raise_dialogs(self) -> None:
+        """Remaking a window (keep on top, Alt+Tab) brings it to the front; put Settings back on top."""
+        dialog = self.settings_dialog
+        if dialog is not None and dialog.isVisible():
+            QTimer.singleShot(0, dialog.raise_)
+            QTimer.singleShot(0, dialog.activateWindow)
 
     def pill_rect(self, key: str) -> list[int] | None:
         """[width, height] or [width, height, x, y] of a window's pill."""
@@ -635,6 +656,65 @@ class DocketApp(QObject):
         else:
             menu.addAction("Switch to checklist", lambda: self.store.set_tab_kind(tab_id, "checklist"))
 
+    def tick_all(self, tab_id: int, on: bool) -> None:
+        """The tick box in a list's header: tick every item, or untick them all."""
+        tab = self.store.tab(tab_id)
+        if tab is None:
+            return
+        items = self.store.items(tab_id)
+        page = self.page_for(tab_id)
+        if on:
+            todo = [i for i in (page.sorted_items() if page is not None else items) if not i.done]
+            if not todo:
+                return
+            timed = tab.is_checklist and tab.timer_on and self.has("timer") and \
+                (tab.timer_started or any(i.started or i.elapsed for i in items))
+            if timed and not confirm(self.main if page is None else page, "Tick every step",
+                                     f"Tick all {len(todo)} remaining step{'s' if len(todo) != 1 else ''}? "
+                                     "This finishes the checklist and saves its time log."):
+                if page is not None:
+                    page.refresh()
+                return
+            for it in todo:
+                self.set_done(it.id, True)
+        else:
+            for it in items:
+                if it.done:
+                    self.timer.set_done(it.id, False)
+        if page is not None:
+            page.schedule_refresh()
+
+    def add_typed(self, tab_id: int, text: str, top: bool = False, due: str = "", end: str = "",
+                  priority: int = 1):
+        """Add one typed or pasted line to a list, the same way an import reads it: dates and !priority at
+        the end, a web address as the link, or "name | category Setup | limit 15m | link …" fields.
+        due/end/priority are the add box's own picks, used when the text doesn't set them."""
+        tab = self.store.tab(tab_id)
+        text = (text or "").strip()
+        if tab is None or not text:
+            return None
+        it = importer.parse_line(text, dt.date.today(), checklist=tab.is_checklist, default_priority=priority)
+        if it is None:
+            return None
+        if not it["due"] and due and not tab.is_checklist:
+            it["due"], it["end"] = due, end
+        category = (it.get("category") or "").strip()
+        if category and tab.is_checklist:
+            if category not in tab.category_list:
+                self.store.add_categories(tab_id, [category])
+            if not tab.show_category and self.has("categories"):
+                self.store.update_tab(tab_id, show_category=True)
+        return self.store.add_item(tab_id, it["name"], due=it["due"], end=it["end"], priority=it["priority"],
+                                   notes=it.get("notes", ""), reminder=it["reminder"],
+                                   remind_time=it["remind_time"], done=it["done"], link=it.get("link", ""),
+                                   category=category if tab.is_checklist else "",
+                                   time_limit=it.get("time_limit", 0), top=top)
+
+    def new_items_on_top(self, flip: bool = False) -> bool:
+        """New items go to the bottom unless Settings says top; Ctrl+Enter adds to the other end once."""
+        top = self.settings.get("new_item_pos", "bottom") == "top"
+        return not top if flip else top
+
     def copy_list(self, tab_id: int, plain: bool = False) -> None:
         tab = self.store.tab(tab_id)
         if tab is None:
@@ -757,6 +837,22 @@ class DocketApp(QObject):
         page = self.page_for(tab_id)
         if page is not None:
             page.edit_description()
+
+    def warn_synced_logs(self, parent: QWidget | None = None) -> None:
+        """Pro: once per folder, point out that time logs (which carry client labels) will sync to the cloud."""
+        from . import syncfolders
+        if not self.has("timelogs"):
+            return
+        folder = str(self.timelog_dir())
+        name = syncfolders.service(folder)
+        if not name or self.settings.get("synced_logs_warned") == folder:
+            return
+        self.set_setting("synced_logs_warned", folder)
+        QMessageBox.information(parent or self.main, "Time logs folder",
+                                f"Your time logs folder syncs to {name}:\n{folder}\n\n"
+                                "Time logs include step names, categories and client labels. If your work has "
+                                "rules about where client information can be stored, check that this folder is "
+                                "allowed, or choose a folder that isn't synced in Settings > Timer.")
 
     def timelog_dir(self) -> Path:
         if self.settings["timelog_dir"]:
@@ -961,13 +1057,23 @@ class DocketApp(QObject):
         self.capture_window.open()
 
     def find_inbox(self):
-        return next((t for t in self.store.tabs() if t.name.strip().casefold() == capture.INBOX.casefold()), None)
+        """Quick capture's own list. Remembered by the list itself, so it can be renamed freely;
+        a list called "Inbox" from 1.3.0/1.3.1 is picked up the first time."""
+        tid = self.settings.get("capture_inbox_id")
+        tab = self.store.tab(tid) if tid else None
+        if tab is None:
+            names = {capture.INBOX.casefold(), "inbox"}
+            tab = next((t for t in self.store.tabs() if t.name.strip().casefold() in names), None)
+            if tab is not None:
+                self.set_setting("capture_inbox_id", tab.id)
+        return tab
 
     def inbox_id(self) -> int:
-        """The Inbox list, made the first time something is captured into it."""
+        """Quick capture's list, made the first time something is captured into it."""
         tab = self.find_inbox()
         if tab is None:
             tab = self.store.add_tab(capture.INBOX, kind="list", color=self.next_color())
+            self.set_setting("capture_inbox_id", tab.id)
         return tab.id
 
     def note_capture(self, tab_id: int) -> None:
@@ -1079,7 +1185,7 @@ class DocketApp(QObject):
             for page in list(self.pages()):
                 page.flush()
             if updates.run_installer_and_quit_soon(path):
-                self.quit()
+                self.quit(ask=False)
             else:
                 QMessageBox.warning(parent or self.main, "Update",
                                     f"Couldn't start the installer. It's saved here:\n{path}")
@@ -1214,15 +1320,12 @@ class DocketApp(QObject):
         if self.has("timelogs"):
             menu.addAction("Open time logs folder", self.open_timelogs)
             added = True
-        if self.has("quick_capture"):
-            menu.addAction(f"Quick capture ({self.settings['hotkey_capture'] or 'no shortcut'})", self.open_capture)
-            added = True
         if added:
             menu.addSeparator()
         menu.addAction("Settings", self.open_settings)
         menu.addAction("Check for updates", lambda: self.check_for_updates(True, parent))
         menu.addSeparator()
-        menu.addAction("Quit Docket", self.quit)
+        menu.addAction("Quit Docket", lambda: self.quit())
 
     def open_companion(self, key: str, extra_args: list[str] | None = None) -> bool:
         """Open a companion app at Docket's time logs, or its download page if it isn't installed."""
@@ -1481,7 +1584,24 @@ class DocketApp(QObject):
         QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
     # ---- quitting -----------------------------------------------------------------------------------------
-    def quit(self) -> None:
+    def quit(self, ask: bool = True) -> None:
+        """Quit Docket. With auto-backup off and unsaved changes, offer a backup first
+        (with it on, a backup is saved on the way out anyway)."""
+        if ask and self.dirty and not self.settings["backup"]:
+            box = QMessageBox(self.main if self.main.isVisible() else None)
+            box.setWindowTitle("Quit Docket")
+            box.setText("Your lists have changed since the last backup.\n\nBack up before quitting?")
+            backup_btn = box.addButton("Back up and quit", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("Quit without backing up", QMessageBox.ButtonRole.DestructiveRole)
+            cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(backup_btn)
+            box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked == cancel_btn:
+                return
+            if clicked == backup_btn and self.backup_now(manual=True) is None:
+                return
         self.quitting = True
         self.qapp.quit()
 

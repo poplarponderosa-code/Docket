@@ -10,15 +10,14 @@ import sys
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPropertyAnimation, Qt, QTimer
-from PySide6.QtGui import QCursor, QGuiApplication, QKeySequence
-from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
+from PySide6.QtGui import QCursor, QGuiApplication
+from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMenu, QMessageBox,
                                QToolButton, QVBoxLayout)
 
 from .. import capture, dates, importer, links, system
 from ..parser import parse_quick_add, take_link
-from ..store import PRIORITIES
 from .icons import dot_icon, icon_button, make_icon
-from .common import round_corners
+from .common import GrowEdit, round_corners
 
 if TYPE_CHECKING:
     from ..app import DocketApp
@@ -26,12 +25,17 @@ if TYPE_CHECKING:
 PASTE_CONFIRM_OVER = 10
 
 
-class CaptureEdit(QLineEdit):
-    """The typing box. Tab opens the list picker; a multi-line paste is handed to the window."""
+class CaptureEdit(GrowEdit):
+    """The typing box: wraps and grows. Enter adds (Shift: keep the box open, Ctrl: other end of the list),
+    Tab opens the list picker, Esc closes, and a multi-line paste is handed to the window."""
 
     def __init__(self, window: "CaptureWindow"):
-        super().__init__()
+        super().__init__(max_lines=4)
         self.win = window
+        self.on_paste = window.paste
+        self.submitted.connect(lambda mods: window.submit(
+            keep_open=bool(mods & Qt.KeyboardModifier.ShiftModifier),
+            flip=bool(mods & Qt.KeyboardModifier.ControlModifier)))
 
     def event(self, e) -> bool:
         if e.type() == QEvent.Type.KeyPress and e.key() == Qt.Key.Key_Tab:
@@ -40,28 +44,10 @@ class CaptureEdit(QLineEdit):
         return super().event(e)
 
     def keyPressEvent(self, e) -> None:
-        if e.matches(QKeySequence.StandardKey.Paste):
-            self.win.paste(QApplication.clipboard().text())
-            return
         if e.key() == Qt.Key.Key_Escape:
             self.win.cancel()
             return
-        if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.win.submit(keep_open=bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier))
-            return
         super().keyPressEvent(e)
-
-    def contextMenuEvent(self, e) -> None:
-        menu = self.createStandardContextMenu()
-        for act in menu.actions():
-            if act.text().replace("&", "").lower().startswith("paste"):
-                try:
-                    act.triggered.disconnect()
-                except (RuntimeError, TypeError):
-                    pass
-                act.triggered.connect(lambda: self.win.paste(QApplication.clipboard().text()))
-        menu.exec(e.globalPos())
-        menu.deleteLater()
 
 
 class Toast(QLabel):
@@ -136,7 +122,9 @@ class CaptureWindow(QFrame):
         prev.addWidget(self.link_icon)
         prev.addWidget(self.preview, 1)
         v.addLayout(prev)
-        self.keys = QLabel("Enter adds · Shift+Enter adds another · Tab picks the list · Esc closes")
+        self.keys = QLabel("Enter adds · Shift+Enter adds another · Ctrl+Enter adds to the other end · "
+                           "Tab picks the list · Esc closes")
+        self.keys.setWordWrap(True)
         self.keys.setObjectName("Hint")
         v.addWidget(self.keys)
 
@@ -265,7 +253,13 @@ class CaptureWindow(QFrame):
         tab = self.app.store.tab(tab_id) if tab_id != -1 else None
         checklist = tab is not None and tab.is_checklist
         today = dt.date.today()
-        if checklist:
+        if "|" in rest:
+            it = importer.parse_line(rest, today, checklist=checklist) or {}
+            name, link = it.get("name", rest), it.get("link", "")
+            parts = [p for p in (f"category {it['category']}" if it.get("category") else "",
+                                 dates.due_label(dates.from_iso(it["due"]), dates.from_iso(it.get("end", "")), today)
+                                 if it.get("due") else "") if p]
+        elif checklist:
             name, link = take_link(rest)
             parts = []
         else:
@@ -288,7 +282,7 @@ class CaptureWindow(QFrame):
                              + ("  ·  " + "  ·  ".join(parts) if parts else ""))
 
     # ---- adding ----------------------------------------------------------------------------
-    def _add_one(self, text: str, tab_id: int) -> str | None:
+    def _add_one(self, text: str, tab_id: int, flip: bool = False) -> str | None:
         """Add one typed line to a list. Returns the list's name, or None if there was nothing."""
         text = text.strip()
         if not text:
@@ -297,26 +291,20 @@ class CaptureWindow(QFrame):
         tab = self.app.store.tab(tid)
         if tab is None:
             return None
-        if tab.is_checklist:
-            name, link = take_link(text)
-            self.app.store.add_item(tid, name or link, link=link)
-        else:
-            q = parse_quick_add(text, dt.date.today())
-            self.app.store.add_item(tid, q.name or q.link or text, due=q.due.isoformat() if q.due else "",
-                                    end=q.end.isoformat() if q.end else "",
-                                    priority=PRIORITIES.index(q.priority) if q.priority else 1,
-                                    reminder=bool(q.remind_time), remind_time=q.remind_time or "", link=q.link)
+        top = self.app.new_items_on_top(flip) if tab.is_checklist else False
+        if self.app.add_typed(tid, text, top=top) is None:
+            return None
         self.app.note_capture(tid)
         return tab.name
 
-    def submit(self, keep_open: bool = False) -> None:
+    def submit(self, keep_open: bool = False, flip: bool = False) -> None:
         text = self.edit.text().strip()
         if not text:
             if not keep_open:
                 self.hide()
             return
         rest, tab_id = self._target_for(text)
-        where = self._add_one(rest, tab_id)
+        where = self._add_one(rest, tab_id, flip)
         self.edit.clear()
         if where is None:
             return
@@ -331,7 +319,7 @@ class CaptureWindow(QFrame):
     def paste(self, text: str) -> None:
         kind = capture.paste_kind(text)
         if kind == "one":
-            self.edit.insert(" ".join(text.split()))
+            self.edit.insertPlainText(" ".join(text.split()))
             return
         if kind == "list":
             data = importer.parse_text(text, "Pasted list")

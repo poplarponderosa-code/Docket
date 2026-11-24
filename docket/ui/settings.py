@@ -10,13 +10,13 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QSize, Qt, QTime, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtGui import QKeySequence
-from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog,
+from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QMessageBox,
                                QFrame, QGridLayout, QHBoxLayout, QKeySequenceEdit, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem,
                                QPushButton, QScrollArea,
                                QSizePolicy, QSpinBox, QTabWidget, QTimeEdit, QToolButton, QVBoxLayout, QWidget)
 
-from .. import __version__, modes, themes, updates
+from .. import __version__, modes, syncfolders, themes, updates
 from .icons import make_icon, swatch_icon
 
 if TYPE_CHECKING:
@@ -121,7 +121,6 @@ class SettingsDialog(QDialog):
         prow.addWidget(self.lines_box)
         prow.addStretch(1)
         v.addLayout(prow)
-        v.addWidget(self._check("Wrap long items in pills (the pill grows taller to fit)", "pill_wrap"))
         v.addWidget(self._check("Snap pills to each other, the main window and screen edges", "snap_pills"))
         v.addWidget(self._hint("Drag a pill's bottom edge to show 1, 2 or 3 items. Double-click its side edge to "
                                "fit the whole item's width. Hold Ctrl while dragging a pill to move every pill "
@@ -143,7 +142,20 @@ class SettingsDialog(QDialog):
         krow.addStretch(1)
         v.addLayout(krow)
         v.addWidget(self._hint("Switch any list with one click: right-click its tab > Switch to…"))
-        v.addWidget(self._section("ITEMS"))
+        prow2 = QHBoxLayout()
+        prow2.addWidget(QLabel("New items go at the"))
+        self.pos_box = QComboBox()
+        self.pos_box.addItem("Bottom", "bottom")
+        self.pos_box.addItem("Top", "top")
+        self.pos_box.setCurrentIndex(0 if s.get("new_item_pos", "bottom") == "bottom" else 1)
+        self.pos_box.currentIndexChanged.connect(lambda i: app.set_setting("new_item_pos", self.pos_box.itemData(i)))
+        prow2.addWidget(self.pos_box)
+        prow2.addWidget(QLabel("of a checklist"))
+        prow2.addStretch(1)
+        v.addLayout(prow2)
+        v.addWidget(self._hint("Ctrl+Enter adds an item to the other end, just that once. Priority lists are "
+                               "always sorted, so this only changes checklists."))
+        v.addWidget(self._section("LONG ITEMS"))
         wrow = QHBoxLayout()
         wrow.addWidget(QLabel("Long item names"))
         self.wrap_box = QComboBox()
@@ -154,6 +166,8 @@ class SettingsDialog(QDialog):
         wrow.addWidget(self.wrap_box)
         wrow.addStretch(1)
         v.addLayout(wrow)
+        v.addWidget(self._check("Wrap long items in pills too (the pill grows taller to fit)", "pill_wrap"))
+        v.addWidget(self._section("ITEMS"))
         v.addWidget(self._check("Show link icons next to items", "show_links"))
         v.addWidget(self._check("Show completed items", "show_done"))
         v.addWidget(self._section("COLUMNS & SORTING (PRIORITY LISTS)"))
@@ -180,8 +194,31 @@ class SettingsDialog(QDialog):
         self.sort_box.setCurrentIndex([k for k, _ in SORT_CHOICES].index(s["sort_key"]))
         self.sort_box.currentIndexChanged.connect(self._sort_changed)
         sort_row.addWidget(self.sort_box)
+        reset_sort = QPushButton("Reset to due date")
+        reset_sort.setObjectName("LinkBtn")
+        reset_sort.setCursor(Qt.CursorShape.PointingHandCursor)
+        reset_sort.setToolTip("Clicking a column header also changes the sort; this puts it back")
+        reset_sort.clicked.connect(self._reset_sort)
+        sort_row.addWidget(reset_sort)
         sort_row.addStretch(1)
         v.addLayout(sort_row)
+        self.check_list = None
+        if modes.has(mode, "timer") or modes.has(mode, "categories"):
+            v.addWidget(self._section("COLUMNS (CHECKLISTS)"))
+            v.addWidget(self._hint("Drag to change the order. Untick Category or Time to hide that column in "
+                                   "every checklist (the timer still runs and the pill still shows it)."))
+            self.check_list = QListWidget()
+            self.check_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+            self.check_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+            self.check_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            self.check_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.check_list.setIconSize(QSize(16, 16))
+            self._fill_check_cols()
+            cmodel = self.check_list.model()
+            cmodel.rowsMoved.connect(lambda *a: QTimer.singleShot(0, self._save_check_cols))
+            cmodel.rowsInserted.connect(lambda *a: QTimer.singleShot(0, self._save_check_cols))
+            self.check_list.itemChanged.connect(self._check_col_ticked)
+            v.addWidget(self.check_list)
         v.addStretch(1)
 
         # ---- Timer (Pro)
@@ -198,7 +235,13 @@ class SettingsDialog(QDialog):
             self.log_folder.setReadOnly(True)
             v.addWidget(self.log_folder)
             v.addLayout(self._buttons([("Change folder…", self._change_logs), ("Open folder", self._open_logs)]))
-            v.addWidget(self._check("Also save a CSV copy (opens in Excel or Google Sheets)", "timelog_csv"))
+            self.csv_box = QCheckBox("Also save a CSV copy (opens in Excel or Google Sheets)")
+            self.csv_box.setChecked(bool(s["timelog_csv"]))
+            self.csv_box.toggled.connect(self._csv_toggled)
+            v.addWidget(self.csv_box)
+            self.logs_note = self._hint(syncfolders.note(app.timelog_dir(), "Time logs"))
+            self.logs_note.setVisible(bool(self.logs_note.text()))
+            v.addWidget(self.logs_note)
             crow = QHBoxLayout()
             crow.addWidget(QLabel("Clear logs older than"))
             self.clear_n = QSpinBox()
@@ -327,6 +370,9 @@ class SettingsDialog(QDialog):
         self.folder.editingFinished.connect(lambda: app.set_setting("backup_dir", self.folder.text().strip()))
         v.addWidget(self.folder)
         v.addLayout(self._buttons([("Change folder…", self._browse), ("Open folder", self._open_backups)]))
+        self.backup_note = self._hint(syncfolders.note(app.backup_dir(), "Your lists"))
+        self.backup_note.setVisible(bool(self.backup_note.text()))
+        v.addWidget(self.backup_note)
         fq = QGridLayout()
         fq.setHorizontalSpacing(8)
         fq.addWidget(QLabel("Save a copy"), 0, 0)
@@ -363,6 +409,9 @@ class SettingsDialog(QDialog):
             v.addWidget(self.tpl_folder)
             v.addLayout(self._buttons([("Change folder…", self._change_templates),
                                        ("Open folder", self._open_templates)]))
+            self.tpl_note = self._hint(syncfolders.note(app.templates_dir(), "Your templates"))
+            self.tpl_note.setVisible(bool(self.tpl_note.text()))
+            v.addWidget(self.tpl_note)
 
         v.addWidget(self._section("IMPORT & EXPORT"))
         v.addWidget(self._hint("Import adds lists from a text file or a spreadsheet saved as CSV, each as a "
@@ -430,6 +479,70 @@ class SettingsDialog(QDialog):
     def current_tab_key(self) -> str:
         i = self.tabs.currentIndex()
         return self.tab_keys[i] if 0 <= i < len(self.tab_keys) else ""
+
+    def _reset_sort(self) -> None:
+        self.app.set_setting("sort_key", "due")
+        self.app.set_setting("sort_dir", 1)
+        self.sort_box.setCurrentIndex(0)
+
+    CHECK_NAMES = {"step": "Step", "category": "Category", "time": "Time"}
+
+    def _fill_check_cols(self) -> None:
+        if self.check_list is None:
+            return
+        self._filling = True
+        self.check_list.clear()
+        grip = make_icon("grip", themes.current["muted"])
+        order = [c for c in self.app.settings.get("check_cols", []) if c in self.CHECK_NAMES]
+        order += [c for c in self.CHECK_NAMES if c not in order]
+        for key in order:
+            item = QListWidgetItem(grip, self.CHECK_NAMES[key])
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsDragEnabled
+            if key != "step":
+                flags |= Qt.ItemFlag.ItemIsUserCheckable
+                hidden = self.app.settings.get("hide_category" if key == "category" else "hide_time", False)
+                item.setCheckState(Qt.CheckState.Unchecked if hidden else Qt.CheckState.Checked)
+            item.setFlags(flags)
+            self.check_list.addItem(item)
+        rows = self.check_list.count()
+        row_h = max(30, self.check_list.sizeHintForRow(0)) if rows else 30
+        self.check_list.setFixedHeight(rows * row_h + 2 * self.check_list.frameWidth() + 8)
+        self._filling = False
+
+    def _save_check_cols(self) -> None:
+        if self._filling or self.check_list is None:
+            return
+        order = []
+        for i in range(self.check_list.count()):
+            key = self.check_list.item(i).data(Qt.ItemDataRole.UserRole)
+            if key and key not in order:
+                order.append(key)
+        if sorted(order) == sorted(self.CHECK_NAMES) and order != self.app.settings.get("check_cols"):
+            self.app.set_setting("check_cols", order)
+
+    def _check_col_ticked(self, item: QListWidgetItem) -> None:
+        if self._filling:
+            return
+        key = item.data(Qt.ItemDataRole.UserRole)
+        if key in ("category", "time"):
+            self.app.set_setting("hide_category" if key == "category" else "hide_time",
+                                 item.checkState() != Qt.CheckState.Checked)
+
+    def _csv_toggled(self, on: bool) -> None:
+        if not on and self.app.has("ledger"):
+            box = QMessageBox(self)
+            box.setWindowTitle("CSV copies")
+            box.setText("Ledger reads the CSV copies of your time logs to make timesheets and invoices.\n\n"
+                        "Turn them off anyway?")
+            box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            if box.exec() != QMessageBox.StandardButton.Yes:
+                self.csv_box.blockSignals(True)
+                self.csv_box.setChecked(True)
+                self.csv_box.blockSignals(False)
+                return
+        self.app.set_setting("timelog_csv", on)
 
     def _fill_target_lists(self) -> None:
         self.target_list.clear()
@@ -528,6 +641,7 @@ class SettingsDialog(QDialog):
 
     def sync_columns(self) -> None:
         self._fill_cols()
+        self._fill_check_cols()
 
     def _sort_changed(self, i: int) -> None:
         self.app.set_setting("sort_key", self.sort_box.itemData(i))
@@ -540,6 +654,8 @@ class SettingsDialog(QDialog):
             self.app.set_setting("backup_dir", path)
             self.tpl_folder.setText(str(self.app.templates_dir()))
             self.log_folder.setText(str(self.app.timelog_dir()))
+            self._sync_notes()
+            self.app.warn_synced_logs(self)
 
     def _open_backups(self) -> None:
         self._open(Path(self.app.backup_dir()))
@@ -549,6 +665,7 @@ class SettingsDialog(QDialog):
         if path:
             self.app.set_setting("templates_dir", path)
             self.tpl_folder.setText(str(self.app.templates_dir()))
+            self._sync_notes()
 
     def _open_templates(self) -> None:
         self._open(self.app.templates_dir())
@@ -612,6 +729,8 @@ class SettingsDialog(QDialog):
         if path:
             self.app.set_setting("timelog_dir", path)
             self.log_folder.setText(str(self.app.timelog_dir()))
+            self._sync_notes()
+            self.app.warn_synced_logs(self)
 
     def _open_logs(self) -> None:
         self._open(self.app.timelog_dir())
@@ -627,6 +746,15 @@ class SettingsDialog(QDialog):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(notices)))
         else:
             QDesktopServices.openUrl(QUrl(f"https://github.com/{updates.GITHUB_REPO}"))
+
+    def _sync_notes(self) -> None:
+        for attr, folder, what in (("backup_note", self.app.backup_dir(), "Your lists"),
+                                   ("logs_note", self.app.timelog_dir(), "Time logs"),
+                                   ("tpl_note", self.app.templates_dir(), "Your templates")):
+            label = getattr(self, attr, None)
+            if label is not None:
+                label.setText(syncfolders.note(folder, what))
+                label.setVisible(bool(label.text()))
 
     def update_last(self) -> None:
         self.last_label.setText(self.app.backup_status(long=True))
