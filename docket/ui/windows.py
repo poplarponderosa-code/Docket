@@ -520,6 +520,7 @@ class DocketWindow(QWidget):
     # ---- pill mode ----------------------------------------------------------------------
     def toggle_collapse(self) -> None:
         if not self.collapsed:
+            QTimer.singleShot(500, lambda: self.app.tip("pill", self) if self.collapsed else None)
             self._full_size = self.size()
             self.body.hide()
             self.pill_list.show()

@@ -126,6 +126,8 @@ def parse_text(text: str, default_name: str, today: dt.date | None = None) -> li
     last: dict | None = None
     for raw in text.splitlines():
         line = raw.rstrip()
+        if re.match(r"^\s*(```|~~~)[\w-]*\s*$", line):      # code fences copied from an AI chat
+            continue
         if not line.strip():
             last = None
             continue
@@ -345,7 +347,7 @@ TEMPLATE_TXT = """\
 #
 # SIMPLE STYLE: write items the same way you type them in the add box.
 #   A date at the end           call mom tomorrow / plan offsite nov 24-28 / pay invoice 12/15
-#   !high !med !low anywhere    fix bug !high
+#   !high !med !low anywhere    fix bug !high   (or the short forms !h !m !l)
 #   A time turns on a reminder  dentist fri 3pm
 #
 # COLUMN STYLE: name first, then any of these, separated by " | ", in any order:

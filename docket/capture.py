@@ -27,6 +27,11 @@ def route(text: str, list_names: list[str]) -> tuple[str, str | None]:
     return " ".join((text[:start] + " " + text[end:]).split()), name
 
 
+def strip_fences(text: str) -> str:
+    """Drop Markdown code-fence lines (```), in case a list copied from an AI chat brought them along."""
+    return "\n".join(ln for ln in text.splitlines() if not re.match(r"^\s*(```|~~~)[\w-]*\s*$", ln))
+
+
 def paste_kind(text: str) -> str:
     """'list' (a ready-made list: first line '## Name'), 'lines' (several items) or 'one'."""
     lines = [ln for ln in text.splitlines() if ln.strip()]

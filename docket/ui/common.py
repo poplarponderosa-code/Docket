@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import QDate, QPoint, QSize, Qt, Signal
+from PySide6.QtCore import QDate, QEvent, QObject, QPoint, QSize, Qt, Signal
 from PySide6.QtGui import QMouseEvent, QTextCursor
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDateEdit, QHBoxLayout, QLabel, QPlainTextEdit, QSizePolicy,
                                QWidget)
@@ -152,6 +152,7 @@ class GrowEdit(QPlainTextEdit):
         self.max_lines = max_lines
         self.multiline = multiline
         self.on_paste = None
+        self.on_escape = None             # called on Esc (e.g. undo the typing and close the field)
         self.setTabChangesFocus(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -175,6 +176,10 @@ class GrowEdit(QPlainTextEdit):
         self.insertPlainText(text)
 
     def keyPressEvent(self, e) -> None:
+        if e.key() == Qt.Key.Key_Escape and self.on_escape is not None:
+            self.on_escape()
+            e.accept()
+            return
         if not self.multiline and e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self.submitted.emit(e.modifiers())
             e.accept()
@@ -210,6 +215,21 @@ class GrowEdit(QPlainTextEdit):
         height = min(max(one, lines_h), one * self.max_lines) + margin
         if self.height() != height:
             self.setFixedHeight(height)
+
+
+class EscFilter(QObject):
+    """Calls on_escape when Esc is pressed in the widget it's installed on (plain QLineEdits)."""
+
+    def __init__(self, widget: QWidget, on_escape):
+        super().__init__(widget)
+        self.on_escape = on_escape
+        widget.installEventFilter(self)
+
+    def eventFilter(self, obj, e) -> bool:
+        if e.type() == QEvent.Type.KeyPress and e.key() == Qt.Key.Key_Escape:
+            self.on_escape()
+            return True
+        return False
 
 
 class ClickLabel(QLabel):

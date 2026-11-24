@@ -4,6 +4,24 @@ A small, quiet to-do window for Windows 11: lists as tabs, each either a priorit
 (due date, item, priority, notes) or a checklist (steps in order), soft colour themes,
 reminders, and plain-text backups you can keep in OneDrive or Google Drive.
 
+## New in 1.4.0
+
+* **A short tour** of where things are, the first time Docket opens (existing users get an invitation
+  once). Switching to a higher mode offers a tour of just what it adds. One-time tips appear the first
+  time you open an item, shrink to a pill or turn on a timer. Settings > General: take the tour again,
+  show tips again, or turn tips off.
+* **Lists from an AI chat.** Settings > AI has instructions to copy into your AI's custom instructions
+  (Claude, ChatGPT, Gemini…). Say the trigger phrase ("put it on the Docket", "send to Docket", "add to
+  Docket" or your own) and it writes a list ready to paste into quick capture or any list's add box.
+* **Paste several lines into a list's add box** to add them all; a paste starting with `## List name`
+  makes new lists (in every mode, not only quick capture). Code-fence lines copied from a chat are ignored.
+* **Esc** in an item's name, link or time limit box undoes what you typed and closes the item; Esc in
+  notes closes it (notes save as you type); Esc in the add box clears it.
+* **New items at the top** now matters in priority lists too: they stay sorted, and the setting decides
+  where a new item goes among items with the same priority and date.
+* **Quitting with a scheduled backup** (hourly or daily) backs up changes made since the last backup on
+  the way out, without asking; also when Windows signs out or shuts down.
+
 ## New in 1.3.2
 
 * A tick box in each list's header ticks every item (click again to untick them all).
@@ -266,18 +284,20 @@ is `Templates` inside your backup folder unless you pick another in Settings.
 
 ## Settings (sliders icon)
 
-Settings are in tabs across the top; each mode only shows what it uses. The scroll wheel scrolls the
+Settings are in tabs across the top (General, Appearance, Lists, AI, Timer, Shortcuts, Backup,
+About); each mode only shows what it uses. The scroll wheel scrolls the
 page without changing dropdowns, dates, times or numbers you scroll over.
 
-* **General:** mode (Basic, Advanced, Pro), run first-time setup again, launch with Windows, start
-  hidden, keep windows on top, show in Alt+Tab, reminders and their default time
+* **General:** mode (Basic, Advanced, Pro), run first-time setup again, the tour and tips, launch
+  with Windows, start hidden, keep windows on top, show in Alt+Tab, reminders and their default time
 * **Appearance:** themes (Light, Dark, Sage, Lavender, Sand), whole-tab colour (Advanced), pills:
   on top, how many items new pills show, wrap long items in pills, snapping
 * **Lists:** what + New list makes, long item names (wrap or one line), link icons, show done items,
-  column order and sorting for priority lists
+  column order and sorting for priority lists, whether new items go at the top or bottom
+* **AI:** instructions to copy into your AI so it writes lists for Docket, and the trigger phrase
 * **Timer** (Pro): sound, time logs folder, CSV copies, clear old time logs, include the client label
   in Copy list, Ledger
-* **Shortcuts** (Advanced): the shortcuts, where quick capture sends items (Inbox, the last list used,
+* **Shortcuts** (Advanced): the shortcuts, where quick capture sends items (the Quick capture list, the last list used,
   or a list you choose), what happens over full-screen apps, and Stream Deck help
 * **Backup:** on/off, folder, how often, how many to keep, back up now, restore; checklist templates
   folder (Advanced); import and export

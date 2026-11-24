@@ -11,11 +11,11 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QGridLayou
                                QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
                                QScrollArea, QSizePolicy, QTimeEdit, QVBoxLayout, QWidget)
 
-from .. import dates, links, themes
+from .. import capture, dates, links, themes
 from ..parser import parse_quick_add, take_link
 from ..timer import fmt_duration, fmt_limit, parse_duration
 from ..store import PRIORITIES, Item
-from .common import ClickableWidget, ClickLabel, ElideLabel, GrowEdit, OptionalDateEdit, repolish, set_prop
+from .common import ClickableWidget, ClickLabel, ElideLabel, EscFilter, GrowEdit, OptionalDateEdit, repolish, set_prop
 from .icons import dot_icon, icon_button, make_icon, set_icon_name
 
 if TYPE_CHECKING:
@@ -555,10 +555,12 @@ class ItemRow(QFrame):
         self.name_edit.setPlaceholderText("Step" if self.checklist else "Item name")
         self.name_edit.editingFinished.connect(self._save_name)
         self.name_edit.submitted.connect(lambda _m: self._name_entered())
+        self.name_edit.on_escape = lambda: self._escape("name")
         v.addWidget(self.name_edit)
         self.notes_edit = GrowEdit(it.notes, max_lines=8, multiline=True)
         self.notes_edit.setPlaceholderText("Notes…")
         self.notes_edit.textChanged.connect(self._notes_timer.start)
+        self.notes_edit.on_escape = lambda: self._escape("notes")
         v.addWidget(self.notes_edit)
         link_row = QHBoxLayout()
         link_row.setSpacing(8)
@@ -569,6 +571,7 @@ class ItemRow(QFrame):
         self.link_edit.setPlaceholderText("A web address, folder or file")
         self.link_edit.setToolTip("Paste a web address, or a folder or file path. The icon by the item opens it.")
         self.link_edit.editingFinished.connect(self._save_link)
+        EscFilter(self.link_edit, lambda: self._escape("link"))
         link_row.addWidget(self.link_edit, 1)
         browse = QPushButton("Browse…")
         bmenu = QMenu(browse)
@@ -610,6 +613,7 @@ class ItemRow(QFrame):
                                            "Leave empty for no limit.")
                 self.limit_edit.setFixedWidth(96)
                 self.limit_edit.editingFinished.connect(self._save_limit)
+                EscFilter(self.limit_edit, lambda: self._escape("limit"))
                 row.addWidget(self.limit_edit)
                 self.recorded_lbl = QLabel()
                 self.recorded_lbl.setObjectName("FieldLabel")
@@ -672,6 +676,8 @@ class ItemRow(QFrame):
             self.page.expanded.discard(self.item.id)
         else:
             self.page.expanded.add(self.item.id)
+            page = self.page
+            QTimer.singleShot(450, lambda: page.app.tip("panel", getattr(page, "scroll", page)))
         self.page.schedule_refresh()
 
     def _quiet_update(self, **fields) -> None:
@@ -753,6 +759,20 @@ class ItemRow(QFrame):
     def _name_entered(self) -> None:
         """Enter in the name box: save it and close the item."""
         self._save_name()
+        if self.item.id in self.page.expanded:
+            self.toggle()
+
+    def _escape(self, field: str) -> None:
+        """Esc in the item's panel: undo unsaved typing in that box and close the item.
+        Notes are kept (they save as you type)."""
+        if self.panel is None:
+            return
+        if field == "name":
+            self.name_edit.setPlainText(self.item.name)
+        elif field == "link":
+            self.link_edit.setText(self.item.link)
+        elif field == "limit":
+            self.limit_edit.setText(fmt_limit(self.item.time_limit))
         if self.item.id in self.page.expanded:
             self.toggle()
 
@@ -923,6 +943,8 @@ class ListPage(QWidget):
         self.input.setPlaceholderText("Add an item… try “dentist fri 3pm !high”")
         self.input.setToolTip("Enter adds it. Ctrl+Enter adds it to the other end of the list.")
         self.input.submitted.connect(self._entered)
+        self.input.on_escape = self._clear_input
+        self.input.on_paste = self._paste
         self.input.textChanged.connect(self._update_preview)
         self.date_btn = QPushButton("Date")
         self.date_btn.setProperty("iconName", "calendar")
@@ -1336,12 +1358,15 @@ class ListPage(QWidget):
         def date_key(i: Item) -> str:
             return i.due or far
 
+        # Items come in list order (position), and Python's sort is stable even when reversed, so items
+        # that tie (same priority and date) keep their list order: "New items go at the top" puts a new
+        # item above the others it ties with.
         if key == "pri":
-            primary = lambda i: (i.priority, date_key(i), i.id)          # noqa: E731
+            primary = lambda i: (i.priority, date_key(i))                # noqa: E731
         elif key == "item":
-            primary = lambda i: (i.name.casefold(), i.id)                # noqa: E731
+            primary = lambda i: i.name.casefold()                        # noqa: E731
         else:
-            primary = lambda i: (date_key(i), i.priority, i.id)          # noqa: E731
+            primary = lambda i: (date_key(i), i.priority)                # noqa: E731
         items.sort(key=primary, reverse=(direction == -1))
         items.sort(key=lambda i: i.done)          # stable: done items sink to the bottom
         return items
@@ -1449,7 +1474,7 @@ class ListPage(QWidget):
         if not text:
             self.input.setFocus()
             return
-        top = self.app.new_items_on_top(flip) if self.is_checklist else False
+        top = self.app.new_items_on_top(flip)
         self.app.add_typed(self.tab_id, text, top=top, due=self.draft_due, end=self.draft_end,
                            priority=self.pri_box.currentIndex() if not self.is_checklist else 1)
         self.input.clear()
@@ -1457,6 +1482,38 @@ class ListPage(QWidget):
         self.pri_box.setCurrentIndex(1)
         self._update_date_button()
         self.input.setFocus()
+
+    def _paste(self, text: str) -> None:
+        """Several lines pasted into the add box: each becomes an item in this list. A paste starting
+        with "## List name" (e.g. a list from an AI chat) makes new lists instead."""
+        from PySide6.QtWidgets import QMessageBox
+        text = capture.strip_fences(text)
+        kind = capture.paste_kind(text)
+        if kind == "one":
+            self.input.insertPlainText(" ".join(text.split()))
+            return
+        if kind == "list":
+            made = self.app.paste_lists(text)
+            if made:
+                n = sum(len(self.app.store.items(t.id)) for t in made)
+                what = f"{len(made)} lists" if len(made) > 1 else f"“{made[0].name}”"
+                self.app.flash(f"Made {what} with {n} item{'s' if n != 1 else ''}")
+            return
+        lines = capture.paste_lines(text)
+        if len(lines) > 10 and QMessageBox.question(
+                self, "Add items", f"Add {len(lines)} items to this list?") != QMessageBox.StandardButton.Yes:
+            return
+        top = self.app.new_items_on_top()
+        for line in (reversed(lines) if top else lines):
+            self.app.add_typed(self.tab_id, line, top=top)
+        self.app.flash(f"Added {len(lines)} item{'s' if len(lines) != 1 else ''}")
+
+    def _clear_input(self) -> None:
+        """Esc in the add box: clear what's typed (and the date/priority picked for it)."""
+        self.input.clear()
+        self.draft_due = self.draft_end = ""
+        self.pri_box.setCurrentIndex(1)
+        self._update_date_button()
 
     def focus_input(self) -> None:
         self.input.setFocus()

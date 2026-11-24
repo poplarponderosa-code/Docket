@@ -291,7 +291,7 @@ class CaptureWindow(QFrame):
         tab = self.app.store.tab(tid)
         if tab is None:
             return None
-        top = self.app.new_items_on_top(flip) if tab.is_checklist else False
+        top = self.app.new_items_on_top(flip)
         if self.app.add_typed(tid, text, top=top) is None:
             return None
         self.app.note_capture(tid)
@@ -317,23 +317,22 @@ class CaptureWindow(QFrame):
             self.toast.show_at(f"Added to {where}", QPoint(geo.center().x(), geo.top() + 6))
 
     def paste(self, text: str) -> None:
+        text = capture.strip_fences(text)
         kind = capture.paste_kind(text)
         if kind == "one":
             self.edit.insertPlainText(" ".join(text.split()))
             return
         if kind == "list":
-            data = importer.parse_text(text, "Pasted list")
-            if not data:
+            made = self.app.paste_lists(text)
+            if not made:
                 return
-            for t in data:
-                if not t.get("color"):
-                    t["color"] = self.app.next_color()
-            made = self.app.store.add_lists(data)
-            n = sum(len(t["items"]) for t in data)
+            n = sum(len(self.app.store.items(t.id)) for t in made)
             self.hide()
-            if made:
-                self.app.main.rebuild_tabs(select=made[0].id)
-            self.toast.show_at(f"Made “{made[0].name}” with {n} item{'s' if n != 1 else ''}" if made else "",
+            if len(made) > 1:
+                note = f"Made {len(made)} lists with {n} item{'s' if n != 1 else ''}"
+            else:
+                note = f"Made “{made[0].name}” with {n} item{'s' if n != 1 else ''}" if made else ""
+            self.toast.show_at(note,
                                QPoint(self.geometry().center().x(), self.geometry().top() + 6))
             return
         lines = capture.paste_lines(text)
@@ -350,6 +349,8 @@ class CaptureWindow(QFrame):
                 self.edit.setFocus()
                 return
         where = None
+        if self.app.new_items_on_top():
+            lines = list(reversed(lines))        # added one by one to the top: keep the pasted order
         for line in lines:
             rest, tid = self._target_for(line)
             if tid == -1:

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QAbstractScrollArea, QAbstractSpinBox, QApplicati
                                QProgressDialog,
                                QMenu, QMessageBox, QSystemTrayIcon, QWidget)
 
-from . import __version__, backup, capture, companions, dates, importer, modes, system, themes, timelogs, updates
+from . import __version__, backup, capture, companions, dates, importer, modes, system, themes, timelogs, tour, updates
 from .store import Store
 from .timer import TimerEngine, fmt_duration
 from .ui.icons import app_icon, dot_icon, refresh_icons
@@ -89,6 +89,9 @@ DEFAULTS = {
     # 1.3.2
     "new_item_pos": "bottom", "check_cols": ["step", "category", "time"], "hide_time": False,
     "hide_category": False, "capture_inbox_id": None, "synced_logs_warned": "",
+    # 1.4.0
+    "ai_phrase": "put it on the Docket", "ai_phrase_custom": "", "ai_copied_version": 0,
+    "tour_done": False, "tour_seen_mode": "", "tips_on": True, "tips_seen": [],
 }
 
 
@@ -160,6 +163,9 @@ class DocketApp(QObject):
                 self.store.set_tab_color(tab.id, self.next_color())
         self.popouts: dict[int, PopoutWindow] = {}
         self.settings_dialog: SettingsDialog | None = None
+        self.active_tour = None
+        self.active_tip = None
+        self.tour_invite = None
 
         themes.set_current(self.settings["theme"])
         qapp.setStyleSheet(themes.stylesheet(themes.current, self.data_dir / "assets"))
@@ -230,6 +236,12 @@ class DocketApp(QObject):
             self.show_main()
         self.update_counts()
         qapp.aboutToQuit.connect(self._shutdown)
+        # Windows signing out or shutting down: save and back up first, since the app may be ended
+        # without a normal quit.
+        try:
+            qapp.commitDataRequest.connect(lambda _manager: self._save_before_exit())
+        except AttributeError:
+            pass
 
         # Windows: shortcuts and lock/unlock notices go to a hidden window that's never remade.
         system.watch_session(int(self.sink.winId()))
@@ -251,6 +263,8 @@ class DocketApp(QObject):
         self._sync_mode_bits()
         if not self.settings["mode"]:
             QTimer.singleShot(700, self.show_setup)
+        elif tour.should_offer_tour(self.settings) and not hidden:
+            QTimer.singleShot(2500, self._invite_tour)
         if "--updated" in argv:
             QTimer.singleShot(1200, lambda: self.flash(f"Updated to Docket {__version__}"))
 
@@ -360,9 +374,13 @@ class DocketApp(QObject):
             self.register_hotkeys()
 
     def change_mode(self, mode: str) -> None:
-        if mode == self.mode():
+        old = self.mode()
+        if mode == old:
             return
         self.set_setting("mode", mode)
+        steps = tour.steps_new_in(old, mode, self.tour_keys())
+        if steps:
+            QTimer.singleShot(600, lambda: self._invite_mode_tour(mode, steps))
         self.flash(f"{modes.LABELS[mode]} mode")
         if self.settings_dialog is not None:          # rebuild Settings so it shows the new mode's tabs
             tab = self.settings_dialog.current_tab_key()
@@ -370,6 +388,81 @@ class DocketApp(QObject):
             old.close()
             old.deleteLater()
             QTimer.singleShot(0, lambda: self.open_settings(tab))
+
+    # ---- tour and tips ---------------------------------------------------------------------------------
+    def tour_keys(self) -> dict:
+        s = self.settings
+        return {"capture_key": s.get("hotkey_capture", ""), "show_key": s.get("hotkey_show", ""),
+                "tick_key": s.get("hotkey_tick", "")}
+
+    def start_tour(self, steps=None) -> None:
+        """The full tour for the current mode (or the given steps). Restartable from Settings > General."""
+        from .ui.tour import Tour
+        if self.active_tour is not None:
+            self.active_tour.stop(False)
+        if self.active_tip is not None:
+            self.active_tip.close()
+        if self.settings_dialog is not None:
+            self.settings_dialog.close()
+        steps = steps or tour.steps_for(self.mode(), self.tour_keys())
+
+        def ended(_finished: bool) -> None:
+            self.active_tour = None
+            self.set_setting("tour_done", True)
+
+        self.active_tour = Tour(self, steps, ended)
+        self.active_tour.start()
+
+    def _invite_tour(self) -> None:
+        if self.settings.get("tour_done") or self.active_tour is not None or self.tour_invite is not None:
+            return
+        from .ui.tour import Invite
+
+        def answered(yes: bool) -> None:
+            self.tour_invite = None
+            self.set_setting("tour_done", True)
+            if yes:
+                self.start_tour()
+            else:
+                self.flash("You can take the tour any time: Settings > General")
+
+        self.tour_invite = Invite(self, "Take a quick tour?",
+                                  "About a minute: where things are and a few things you might not know "
+                                  "Docket does.", "Take the tour", "Not now", answered)
+        self.tour_invite.show()
+
+    def _invite_mode_tour(self, mode: str, steps) -> None:
+        if self.active_tour is not None or self.tour_invite is not None or self.mode() != mode:
+            return
+        from .ui.tour import Invite
+
+        def answered(yes: bool) -> None:
+            self.tour_invite = None
+            if yes:
+                self.start_tour(steps)
+
+        label = modes.LABELS.get(mode, mode)
+        self.tour_invite = Invite(self, f"{label} mode is on",
+                                  f"Want a short tour of what {label} adds?", "Show me", "No thanks", answered)
+        self.tour_invite.show()
+
+    def tip(self, key: str, anchor) -> None:
+        """Show a one-time tip next to anchor (a widget), if tips are on and it hasn't been shown."""
+        if not tour.tip_due(self.settings, key) or self.active_tour is not None or self.active_tip is not None:
+            return
+        try:
+            if anchor is None or not anchor.isVisible():
+                return                 # try again next time
+        except RuntimeError:           # the widget was rebuilt in the meantime
+            return
+        from .ui.tour import Tip
+        self.set_setting("tips_seen", list(self.settings.get("tips_seen") or []) + [key])
+        self.active_tip = Tip(self, key, anchor)
+        self.active_tip.show()
+
+    def reset_tips(self) -> None:
+        self.set_setting("tips_seen", [])
+        self.set_setting("tips_on", True)
 
     def show_setup(self) -> None:
         from .ui.setup import SetupDialog
@@ -381,10 +474,14 @@ class DocketApp(QObject):
                              parent=self.main if self.main.isVisible() else None)
         self.setup_dialog = dialog
 
+        new_install = not self.upgrading and not self.settings.get("setup_done")
+
         def done(_result) -> None:
             self.setup_dialog = None
             self.upgrading = False
             dialog.deleteLater()
+            if not self.settings.get("tour_done"):
+                QTimer.singleShot(500, self.start_tour if new_install else self._invite_tour)
 
         dialog.finished.connect(done)
         dialog.show()
@@ -580,6 +677,19 @@ class DocketApp(QObject):
         self.show_main()
 
     # ---- list colour, type, templates ------------------------------------------------------------
+    def paste_lists(self, text: str) -> list:
+        """Make new lists from pasted text that starts with "## List name" (quick capture, add box)."""
+        data = importer.parse_text(capture.strip_fences(text), "Pasted list")
+        picked: list[str] = []
+        for t in data:
+            if not t.get("color"):
+                t["color"] = self.next_color(picked)
+            picked.append(t["color"])
+        made = self.store.add_lists(data) if data else []
+        if made:
+            self.main.rebuild_tabs(select=made[0].id)
+        return made
+
     def next_color(self, also_used: list[str] | None = None) -> str:
         used = [t.color for t in self.store.tabs()] + list(also_used or [])
         for key in themes.COLOR_ORDER:
@@ -821,6 +931,10 @@ class DocketApp(QObject):
         if not on and tab.timer_running:
             self.timer.pause(tab_id)
         self.store.update_tab(tab_id, timer_on=on)
+        if on:
+            page = self.page_for(tab_id)
+            if page is not None:
+                QTimer.singleShot(400, lambda: self.tip("timer", getattr(page, "scroll", page)))
 
     def open_link(self, link: str) -> None:
         from . import links
@@ -1585,8 +1699,9 @@ class DocketApp(QObject):
 
     # ---- quitting -----------------------------------------------------------------------------------------
     def quit(self, ask: bool = True) -> None:
-        """Quit Docket. With auto-backup off and unsaved changes, offer a backup first
-        (with it on, a backup is saved on the way out anyway)."""
+        """Quit Docket. With auto-backup off and unsaved changes, offer a backup first.
+        With auto-backup on (any schedule: every change, hourly or daily), changes since the last
+        backup are backed up quietly on the way out (_save_before_exit)."""
         if ask and self.dirty and not self.settings["backup"]:
             box = QMessageBox(self.main if self.main.isVisible() else None)
             box.setWindowTitle("Quit Docket")
@@ -1604,6 +1719,23 @@ class DocketApp(QObject):
                 return
         self.quitting = True
         self.qapp.quit()
+
+    def _save_before_exit(self) -> None:
+        """Save what's typed and, with auto-backup on, back up changes made since the last backup,
+        whatever the schedule, so a Daily backup doesn't lose today's changes on quit."""
+        for page in list(self.pages()):
+            try:
+                page.flush()
+            except Exception:
+                pass
+        if self.settings["backup"] and self.dirty:
+            try:
+                self._backup_debounce.stop()
+                backup.write_backup(self.store, self.backup_dir(), int(self.settings["backup_keep"]))
+                self.store.set_setting("last_backup", dt.datetime.now().isoformat(timespec="seconds"))
+                self.dirty = False
+            except OSError:
+                pass
 
     def _shutdown(self) -> None:
         self.quitting = True
@@ -1624,12 +1756,7 @@ class DocketApp(QObject):
         if self.capture_window is not None:
             self.capture_window.hide()
             self.capture_window.toast.hide()
-        if self.settings["backup"] and self.dirty:
-            try:
-                backup.write_backup(self.store, self.backup_dir(), int(self.settings["backup_keep"]))
-                self.store.set_setting("last_backup", dt.datetime.now().isoformat(timespec="seconds"))
-            except OSError:
-                pass
+        self._save_before_exit()
         self.tray.hide()
         self.store.close()
 

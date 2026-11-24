@@ -1,4 +1,4 @@
-"""Settings, in tabs across the top: General, Appearance, Lists, Timer, Shortcuts, Backup, About.
+"""Settings, in tabs across the top: General, Appearance, Lists, AI, Timer, Shortcuts, Backup, About.
 
 Each mode only shows what it uses, and everything is laid out to fit the window's width.
 """
@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComb
                                QPushButton, QScrollArea,
                                QSizePolicy, QSpinBox, QTabWidget, QTimeEdit, QToolButton, QVBoxLayout, QWidget)
 
-from .. import __version__, modes, syncfolders, themes, updates
+from .. import __version__, aiprompt, modes, syncfolders, themes, updates
 from .icons import make_icon, swatch_icon
 
 if TYPE_CHECKING:
@@ -62,6 +62,10 @@ class SettingsDialog(QDialog):
         v.addWidget(self._hint(" · ".join(modes.SUMMARIES[mode][1])))
         v.addWidget(self._hint("All modes are free. Switching only hides or shows features; nothing is lost."))
         v.addLayout(self._buttons([("Run first-time setup again…", app.show_setup)]))
+        v.addWidget(self._section("TOUR & TIPS"))
+        v.addLayout(self._buttons([("Take the tour", app.start_tour), ("Show tips again", self._tips_again)]))
+        self.tips_box = self._check("Show a tip the first time I use a feature", "tips_on")
+        v.addWidget(self.tips_box)
         v.addWidget(self._section("WINDOWS"))
         v.addWidget(self._check("Launch when Windows starts", "startup"))
         v.addWidget(self._check("Start hidden in the tray", "start_hidden"))
@@ -150,11 +154,12 @@ class SettingsDialog(QDialog):
         self.pos_box.setCurrentIndex(0 if s.get("new_item_pos", "bottom") == "bottom" else 1)
         self.pos_box.currentIndexChanged.connect(lambda i: app.set_setting("new_item_pos", self.pos_box.itemData(i)))
         prow2.addWidget(self.pos_box)
-        prow2.addWidget(QLabel("of a checklist"))
+        prow2.addWidget(QLabel("of a list"))
         prow2.addStretch(1)
         v.addLayout(prow2)
-        v.addWidget(self._hint("Ctrl+Enter adds an item to the other end, just that once. Priority lists are "
-                               "always sorted, so this only changes checklists."))
+        v.addWidget(self._hint("Ctrl+Enter adds an item to the other end, just that once. Priority lists stay "
+                               "sorted; this decides where a new item goes among items with the same "
+                               "priority and date."))
         v.addWidget(self._section("LONG ITEMS"))
         wrow = QHBoxLayout()
         wrow.addWidget(QLabel("Long item names"))
@@ -219,6 +224,61 @@ class SettingsDialog(QDialog):
             cmodel.rowsInserted.connect(lambda *a: QTimer.singleShot(0, self._save_check_cols))
             self.check_list.itemChanged.connect(self._check_col_ticked)
             v.addWidget(self.check_list)
+        v.addStretch(1)
+
+        # ---- AI (all modes)
+        v = self._page("ai", "AI")
+        v.addWidget(self._section("LISTS FROM AN AI CHAT"))
+        v.addWidget(self._hint("Copy these instructions into your AI's custom instructions or a project's "
+                               "instructions (Claude, ChatGPT, Gemini and others). Then say the phrase below in "
+                               "any chat, and it writes the list in Docket's format, ready to paste into "
+                               + ("quick capture or " if modes.has(mode, "quick_capture") else "")
+                               + "a list's add box."))
+        v.addWidget(self._hint("Pasted into a single chat instead, they only last for that conversation."))
+        phrow = QHBoxLayout()
+        phrow.addWidget(QLabel("Trigger phrase"))
+        self.phrase_box = QComboBox()
+        for p in aiprompt.PHRASES:
+            self.phrase_box.addItem(f"“{p}”", p)
+        self.phrase_box.addItem("Custom…", "custom")
+        current = s.get("ai_phrase", aiprompt.DEFAULT_PHRASE)
+        idx = self.phrase_box.findData(current)
+        self.phrase_box.setCurrentIndex(idx if idx >= 0 else 0)
+        phrow.addWidget(self.phrase_box, 1)
+        v.addLayout(phrow)
+        self.phrase_edit = QLineEdit(s.get("ai_phrase_custom", ""))
+        self.phrase_edit.setPlaceholderText("Your own phrase, e.g. “docket this”")
+        self.phrase_edit.setMaxLength(60)
+        self.phrase_edit.setVisible(current == "custom")
+        self.phrase_edit.editingFinished.connect(self._custom_phrase_done)
+        self.phrase_edit.textChanged.connect(lambda _t: self._refresh_ai_text())
+        v.addWidget(self.phrase_edit)
+        self.phrase_box.currentIndexChanged.connect(self._phrase_changed)
+        self.ai_update = self._hint("")
+        self.ai_update.setObjectName("AttentionHint")
+        v.addWidget(self.ai_update)
+        ai_btns = QHBoxLayout()
+        self.copy_ai_btn = QPushButton("Copy instructions")
+        self.copy_ai_btn.setProperty("primary", True)
+        self.copy_ai_btn.setMinimumWidth(150)
+        self.copy_ai_btn.clicked.connect(self._copy_ai)
+        ai_btns.addWidget(self.copy_ai_btn)
+        self.ai_show = QPushButton("Show full instructions")
+        self.ai_show.setCheckable(True)
+        self.ai_show.toggled.connect(self._toggle_ai_text)
+        ai_btns.addWidget(self.ai_show)
+        ai_btns.addStretch(1)
+        v.addLayout(ai_btns)
+        from PySide6.QtWidgets import QPlainTextEdit
+        self.ai_text = QPlainTextEdit()
+        self.ai_text.setReadOnly(True)
+        self.ai_text.setMinimumHeight(260)
+        self.ai_text.setVisible(False)
+        v.addWidget(self.ai_text)
+        self._refresh_ai_text()
+        v.addWidget(self._hint("The instructions tell the AI to leave out client labels unless you typed one, "
+                               "and to use your own category names. Nothing is sent anywhere by Docket: you "
+                               "copy and paste."))
         v.addStretch(1)
 
         # ---- Timer (Pro)
@@ -475,6 +535,54 @@ class SettingsDialog(QDialog):
         self.tabs.addTab(scroll, title)
         self.tab_keys.append(key)
         return v
+
+    def _tips_again(self) -> None:
+        self.app.reset_tips()
+        self.tips_box.setChecked(True)
+        self.app.flash("Tips will show again")
+
+    # ---- AI instructions
+    def _ai_phrase(self) -> str:
+        choice = self.phrase_box.itemData(self.phrase_box.currentIndex())
+        if choice == "custom":
+            return aiprompt.clean_phrase(self.phrase_edit.text()) or aiprompt.DEFAULT_PHRASE
+        return choice or aiprompt.DEFAULT_PHRASE
+
+    def _phrase_changed(self, i: int) -> None:
+        choice = self.phrase_box.itemData(i)
+        self.phrase_edit.setVisible(choice == "custom")
+        if choice == "custom":
+            self.phrase_edit.setFocus()
+        self.app.set_setting("ai_phrase", choice)
+        self._refresh_ai_text()
+
+    def _custom_phrase_done(self) -> None:
+        self.app.set_setting("ai_phrase_custom", aiprompt.clean_phrase(self.phrase_edit.text()))
+        self._refresh_ai_text()
+
+    def _refresh_ai_text(self) -> None:
+        self.ai_text.setPlainText(aiprompt.instructions(self._ai_phrase()))
+        copied = int(self.app.settings.get("ai_copied_version", 0) or 0)
+        if aiprompt.update_available(copied):
+            self.ai_update.setText("Updated instructions available: copy them again and replace the old ones "
+                                   "in your AI.")
+        else:
+            self.ai_update.setText("")
+        self.ai_update.setVisible(bool(self.ai_update.text()))
+
+    def _toggle_ai_text(self, on: bool) -> None:
+        self.ai_text.setVisible(on)
+        self.ai_show.setText("Hide full instructions" if on else "Show full instructions")
+
+    def _copy_ai(self) -> None:
+        from PySide6.QtWidgets import QApplication
+        if self.phrase_box.itemData(self.phrase_box.currentIndex()) == "custom":
+            self._custom_phrase_done()
+        QApplication.clipboard().setText(aiprompt.instructions(self._ai_phrase()))
+        self.app.set_setting("ai_copied_version", aiprompt.VERSION)
+        self._refresh_ai_text()
+        self.copy_ai_btn.setText("Copied ✓")
+        QTimer.singleShot(2000, lambda: self.copy_ai_btn.setText("Copy instructions"))
 
     def current_tab_key(self) -> str:
         i = self.tabs.currentIndex()

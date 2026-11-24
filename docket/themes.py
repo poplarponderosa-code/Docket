@@ -92,6 +92,7 @@ QToolTip {{ background: {p['text']}; color: {p['win']}; border: 0; padding: 4px 
 #TitleExtra[status="overdue"] {{ color: {p['warn']}; font-weight: 600; }}
 #PillList {{ background: {p['win']}; }}
 #Hint {{ font-size: 11px; }}
+#AttentionHint {{ color: {p['accent']}; font-size: 11px; font-weight: 600; }}
 #Body, #ListContainer, #Popup, #Settings, #SettingsBody {{ background: {p['surface']}; }}
 #TabRow {{ background: {p['win']}; border-bottom: 1px solid {p['border']}; }}
 #TabRow[drop="true"] {{ background: {p['accentSoft']}; border-bottom: 2px solid {p['accent']}; }}
@@ -178,6 +179,12 @@ QTabWidget#SettingsTabs QTabBar::tab:hover {{ color: {p['text']}; }}
 QToolButton#CaptureList {{ border: 1px solid {p['border']}; border-radius: 8px; padding: 5px 8px;
     background: {p['win']}; color: {p['text']}; }}
 QToolButton#CaptureList:hover {{ background: {p['hover']}; }}
+#TourCard {{ background: {p['surface']}; border: 1px solid {p['accent']}; border-radius: 12px; }}
+#TourCount {{ color: {p['muted']}; font-size: 10px; font-weight: 600; letter-spacing: 1px; }}
+#TourTitle {{ color: {p['text']}; font-size: 14px; font-weight: 600; }}
+#TourText {{ color: {p['text']}; font-size: 12px; }}
+QPushButton#TourLink {{ border: 0; background: transparent; color: {p['muted']}; padding: 4px 2px; }}
+QPushButton#TourLink:hover {{ color: {p['text']}; text-decoration: underline; }}
 #Toast {{ background: {p['text']}; color: {p['surface']}; border-radius: 10px; font-size: 13px; }}
 QToolButton[iconBtn="true"]::menu-button {{ border: 0; width: 12px; }}
 QToolButton[iconBtn="true"]::menu-arrow {{ width: 8px; height: 8px; }}
