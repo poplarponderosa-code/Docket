@@ -4,6 +4,35 @@ A small, quiet to-do window for Windows 11: lists as tabs, each either a priorit
 (due date, item, priority, notes) or a checklist (steps in order), soft colour themes,
 reminders, and plain-text backups you can keep in OneDrive or Google Drive.
 
+## New in 1.3.0
+
+* **Basic, Advanced and Pro modes.** Docket asks which you'd like the first time it opens (all free;
+  switch any time in Settings > General). Basic is lists, checklists, quick add, reminders, pills,
+  pop-outs, list colours and links. Advanced adds quick capture, shortcuts and Stream Deck, templates
+  and whole-tab colour. Pro adds the checklist timer, categories, client labels, time logs and Ledger.
+  A short setup page follows (backup folder, start with Windows, theme, time logs folder in Pro) and
+  lists the companion apps you can install.
+* **Settings in tabs** across the top: General, Appearance, Lists, Timer, Shortcuts, Backup, About.
+* **Quick capture** (F16): a small box at the top of the screen you're on. Enter adds, Shift+Enter adds
+  another, Esc closes. Items go to an Inbox list unless you press Tab to pick one or type `#listname`.
+  Paste several lines to add them all, or paste text starting with `## Name` to make a new list.
+  The microphone starts Windows voice typing (Win+H).
+* **Item links**: a web address, folder or file on any item (open the item, or type a web address in
+  quick add). A small icon by the item, and on its pill, opens it.
+* **Long items wrap** (or keep them on one line with …, Settings > Lists). Pills can wrap too.
+* **Copy list** and **Copy as plain text** (right-click a tab). A copied list pastes straight back into
+  quick capture as a new list. The client label is left out unless you turn it on.
+* **Client labels** for checklists (Pro, right-click the tab). They go into the time log for Ledger;
+  your client's details stay in Ledger.
+* New lists are checklists by default; switch any list with one click from its tab menu.
+* Alt+Tab shows Docket (still no taskbar icon). Hold Ctrl while dragging a pill to move every pill
+  snapped to it. Dragging a step near the edge of a list scrolls it.
+* Pro: click a step's category to change it, click its time to give it a limit, copy categories from
+  another checklist, a Reset button on a finished checklist's pill, "Export time log and reset", and
+  Clear time logs in Settings > Timer.
+* Time logs: step and category names start with a capital letter, and each log has the client and
+  template. Step times now add up exactly to the time the checklist ran.
+
 ## Get it running
 
 You need Python 3.10 or newer from python.org. Tick "Add python.exe to PATH" when you install it.
@@ -22,17 +51,18 @@ moving the app never touches them.
 
 ## Keyboard shortcuts and Stream Deck
 
-Three shortcuts work from any program, set in Settings > Keyboard shortcuts:
+These work from any program (Advanced and Pro modes), set in Settings > Shortcuts:
 
 | Action | Default |
 |---|---|
+| Quick capture | F16 |
 | Show or hide Docket | F13 |
 | Tick the top item on the active list | F14 |
 | Start or pause the timer | F15 |
 
-F13–F15 aren't on most keyboards, so they can't clash with other programs' shortcuts, but a
+F13–F16 aren't on most keyboards, so they can't clash with other programs' shortcuts, but a
 Stream Deck can send them. To set up a Stream Deck: drag a **Hotkey** action (System) onto a key and
-set its hotkey to the shortcut; repeat for the other two. If you'd rather use your keyboard, pick any
+set its hotkey to the shortcut; repeat for the others. If you'd rather use your keyboard, pick any
 other combination in Settings; it tells you if another program already uses it. "Active list" means
 the checklist whose timer is running, otherwise the list you used last.
 
@@ -221,21 +251,22 @@ is `Templates` inside your backup folder unless you pick another in Settings.
 
 ## Settings (sliders icon)
 
-* Themes: Light, Dark, Sage, Lavender, Sand
-Everything fits the window now; nothing hides off to the side. The scroll wheel scrolls the
-settings page and lists without changing dropdowns, dates, times or numbers you scroll over.
+Settings are in tabs across the top; each mode only shows what it uses. The scroll wheel scrolls the
+page without changing dropdowns, dates, times or numbers you scroll over.
 
-* Launch when Windows starts, start hidden in the tray, keep windows on top, keep pills on top
-* Reminder notifications and the default time (9:00 AM). Each item can have its own time.
-  A reminder appears on the item's start date, or straight away if the item is already late.
-* Columns: drag them by the handle to reorder, untick Priority to hide it; sort order;
-  show/hide done items
-* Fill whole tabs with their list's colour
-* Backup: on/off, folder (Change folder…), how often (after every change, hourly, daily), how many
-  files to keep, Back up now, Restore from backup, Open folder
-* Checklist templates: the templates folder, with Change folder… and Open folder
-* Import & export: Import a list…, export any list (pick it from the dropdown), and Save example
-  files…
+* **General:** mode (Basic, Advanced, Pro), run first-time setup again, launch with Windows, start
+  hidden, keep windows on top, show in Alt+Tab, reminders and their default time
+* **Appearance:** themes (Light, Dark, Sage, Lavender, Sand), whole-tab colour (Advanced), pills:
+  on top, how many items new pills show, wrap long items in pills, snapping
+* **Lists:** what + New list makes, long item names (wrap or one line), link icons, show done items,
+  column order and sorting for priority lists
+* **Timer** (Pro): sound, time logs folder, CSV copies, clear old time logs, include the client label
+  in Copy list, Ledger
+* **Shortcuts** (Advanced): the shortcuts, where quick capture sends items (Inbox, the last list used,
+  or a list you choose), what happens over full-screen apps, and Stream Deck help
+* **Backup:** on/off, folder, how often, how many to keep, back up now, restore; checklist templates
+  folder (Advanced); import and export
+* **About:** version, updates, companion apps, notices
 
 ## Importing lists you already have
 

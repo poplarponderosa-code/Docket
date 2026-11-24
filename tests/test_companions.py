@@ -28,3 +28,12 @@ def test_shared_file_keeps_other_keys(tmp_path):
     (tmp_path / "shared.json").write_text("not json", encoding="utf-8")
     companions.write_shared(tmp_path, {"timelog_dir": "D:/x"})
     assert json.loads((tmp_path / "shared.json").read_text(encoding="utf-8")) == {"timelog_dir": "D:/x"}
+
+
+def test_modes():
+    from docket import companions
+    assert [c.key for c in companions.for_mode("pro")] == ["ledger"]
+    assert companions.for_mode("basic") == [] and companions.for_mode("advanced") == []
+    assert [c.key for c in companions.suits_exactly("pro")] == ["ledger"]
+    led = companions.get("ledger")
+    assert led.api_latest.endswith("/Docket-Ledger/releases/latest") and led.description and led.features

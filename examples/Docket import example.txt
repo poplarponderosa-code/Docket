@@ -6,6 +6,13 @@
 # A line starting with "## " begins a list. Without one, the list is named after the file.
 # Add [checklist] after the name for a checklist (steps only, no dates), and/or a colour:
 #   ## Map making [checklist, teal]       colours: blue teal sage olive amber peach rose plum lavender slate
+# For a checklist with its timer on, add "timer" and/or a total time: [checklist, teal, timer, limit 3h]
+# Lines starting with "> " right under the name line are the list's description.
+# A step's time limit goes after a " | ": Paint terrain | limit 45m
+# A link (web address, folder or file) for an item: Map files | link C:\Maps\River Valley
+#   (in the simple style a web address is picked up on its own: check https://example.com fri)
+# Checklist categories: a line "@categories: Terrain; Roads; Assets" under the name line,
+#   and a step's category after a " | ": Paint terrain | limit 45m | category Terrain
 #
 # SIMPLE STYLE: write items the same way you type them in the add box.
 #   A date at the end           call mom tomorrow / plan offsite nov 24-28 / pay invoice 12/15
@@ -38,11 +45,13 @@ Weekend groceries sat
     Oats, coffee, apples, rice.
 Fix closet door !low
 
-## Map making process [checklist, teal]
-Gather heightmap and reference imagery
-Import heightmap and set water level
+## Map making process [checklist, teal, timer]
+@categories: Research; Terrain; Roads; Publishing
+> Steps for a new map, start to finish.
+Gather heightmap and reference imagery | limit 30m | category Research
+Import heightmap and set water level | limit 20m | category Terrain
     Check the sea level against the reference.
-Paint terrain textures
-Place roads and rail connections
+Paint terrain textures | limit 1h | category Terrain
+Place roads and rail connections | category Roads
 Test play and fix issues
-Write the listing and upload
+Write the listing and upload | category Publishing

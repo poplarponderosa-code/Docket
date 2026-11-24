@@ -161,6 +161,24 @@ QToolButton#LogoBtn:hover {{ background: {p['hover']}; }}
 QToolButton#LogoBtn::menu-indicator {{ image: none; width: 0px; }}
 #InfoBox QLabel {{ color: {p['text']}; font-size: 12px; }}
 QKeySequenceEdit QLineEdit {{ background: {p['win']}; }}
+#CategoryCell:hover {{ color: {p['text']}; }}
+#TimeCell:hover {{ text-decoration: underline; }}
+QTabWidget#SettingsTabs::pane {{ border: 0; border-top: 1px solid {p['border']}; }}
+QTabWidget#SettingsTabs QTabBar::tab {{ padding: 6px 12px; margin: 0 2px; border: 0; color: {p['muted']};
+    background: transparent; }}
+QTabWidget#SettingsTabs QTabBar::tab:selected {{ color: {p['text']}; border-bottom: 2px solid {p['accent']}; }}
+QTabWidget#SettingsTabs QTabBar::tab:hover {{ color: {p['text']}; }}
+#SetupTitle {{ font-size: 17px; font-weight: 600; padding-bottom: 4px; }}
+#ModeCard {{ background: {p['win']}; border: 1px solid {p['border']}; border-radius: 10px; }}
+#ModeCard[on="true"] {{ border: 2px solid {p['accent']}; background: {p['accentSoft']}; }}
+#ModeRadio {{ font-weight: 600; }}
+#CompanionChip {{ background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 12px; }}
+#Capture {{ background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 12px; }}
+#Capture QLineEdit {{ font-size: 15px; padding: 6px 8px; }}
+QToolButton#CaptureList {{ border: 1px solid {p['border']}; border-radius: 8px; padding: 5px 8px;
+    background: {p['win']}; color: {p['text']}; }}
+QToolButton#CaptureList:hover {{ background: {p['hover']}; }}
+#Toast {{ background: {p['text']}; color: {p['surface']}; border-radius: 10px; font-size: 13px; }}
 QToolButton[iconBtn="true"]::menu-button {{ border: 0; width: 12px; }}
 QToolButton[iconBtn="true"]::menu-arrow {{ width: 8px; height: 8px; }}
 

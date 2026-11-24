@@ -66,13 +66,31 @@ class OptionalDateEdit(QDateEdit):
 
 
 class ElideLabel(QLabel):
-    """A one-line label that shortens itself with … when there's no room."""
+    """A label that either wraps onto more lines or stays on one line and shortens itself with …
+    (hovering a shortened one shows the whole text)."""
+
+    clicked = Signal()
 
     def __init__(self, text: str = "", parent: QWidget | None = None):
         super().__init__(parent)
         self._full = text
+        self._wrap = False
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._refresh()
+
+    def set_wrap(self, wrap: bool) -> None:
+        if wrap == self._wrap:
+            return
+        self._wrap = wrap
+        self.setWordWrap(wrap)
+        policy = self.sizePolicy()
+        policy.setHeightForWidth(wrap)
+        self.setSizePolicy(policy)
+        self._refresh()
+        self.updateGeometry()
+
+    def wraps(self) -> bool:
+        return self._wrap
 
     def setFullText(self, text: str) -> None:
         self._full = text
@@ -83,16 +101,51 @@ class ElideLabel(QLabel):
 
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
-        self._refresh()
+        if not self._wrap:
+            self._refresh()
 
     def minimumSizeHint(self) -> QSize:
+        if self._wrap:
+            return QSize(24, self.fontMetrics().height())
         return QSize(24, super().minimumSizeHint().height())
 
+    def needed_height(self, width: int) -> int:
+        """Height the whole text needs at this width (wrapped)."""
+        rect = self.fontMetrics().boundingRect(0, 0, max(16, width), 10_000,
+                                               int(Qt.TextFlag.TextWordWrap) | int(Qt.AlignmentFlag.AlignLeft),
+                                               self._full)
+        return max(self.fontMetrics().height(), rect.height())
+
+    def mousePressEvent(self, e) -> None:
+        if getattr(self, "clickable", False) and e.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
     def _refresh(self) -> None:
+        if self._wrap:
+            super().setText(self._full)
+            self.setToolTip("")
+            return
         width = max(16, self.width())
         shown = self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight, width)
         super().setText(shown)
         self.setToolTip(self._full if shown != self._full else "")
+
+
+class ClickLabel(QLabel):
+    """A label you can click (the Time cell, the pill's time). Set clickable = True to use it."""
+
+    clicked = Signal()
+    clickable = False
+
+    def mousePressEvent(self, e) -> None:
+        if e.button() == Qt.MouseButton.LeftButton and getattr(self, "clickable", False):
+            self.clicked.emit()
+            e.accept()
+            return
+        super().mousePressEvent(e)
 
 
 class ClickableWidget(QWidget):

@@ -86,9 +86,9 @@ class UpdateChecker:
         req.setRawHeader(b"Accept", b"application/vnd.github+json")
         return req
 
-    def check(self, on_result) -> None:
-        """on_result(release_dict_or_None, error_text_or_empty)."""
-        reply = self.net.get(self._request(API_LATEST))
+    def check(self, on_result, url: str = API_LATEST) -> None:
+        """on_result(release_dict_or_None, error_text_or_empty). A repo with no release gives None."""
+        reply = self.net.get(self._request(url))
 
         def done() -> None:
             from PySide6.QtNetwork import QNetworkReply

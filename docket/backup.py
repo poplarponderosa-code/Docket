@@ -8,7 +8,9 @@ Format (one file holds every list):
     ## Work
     - [ ] Submit quarterly report | due: 2026-11-20 | priority: High | remind 15:00
         Pull figures from the shared drive.
-    - [x] Plan offsite | due: 2026-11-24 to 2026-11-28 | priority: Low
+    - [x] Plan offsite | due: 2026-11-24 to 2026-11-28 | priority: Low | link: https://example.com
+
+    ## Map release [checklist, client: Acme, template: Map release]
 
 Notes sit under their item, indented four spaces.
 """
@@ -27,8 +29,13 @@ ITEM_RE = re.compile(r"^- \[( |x|X)\] (.*)$")
 HEADER_RE = re.compile(r"^##\s+(.*?)\s*(?:\[([^\]]*)\])?\s*$")
 
 
-def format_header(tab: Tab) -> str:
-    """'## Map making [checklist, teal]': the list's name, type and colour."""
+def _attr_value(text: str) -> str:
+    """Header values can't hold the characters that separate them."""
+    return " ".join(text.replace(",", " ").replace("[", "(").replace("]", ")").split())
+
+
+def format_header(tab: Tab, include_client: bool = True) -> str:
+    """'## Map making [checklist, teal, client: Acme]': the list's name, type, colour and fields."""
     attrs = []
     if tab.kind == "checklist":
         attrs.append("checklist")
@@ -38,6 +45,10 @@ def format_header(tab: Tab) -> str:
         attrs.append("timer")
     if tab.time_limit:
         attrs.append(f"limit {fmt_limit(tab.time_limit)}")
+    if include_client and tab.client.strip():
+        attrs.append(f"client: {_attr_value(tab.client)}")
+    if tab.template.strip():
+        attrs.append(f"template: {_attr_value(tab.template)}")
     return f"## {tab.name}" + (f" [{', '.join(attrs)}]" if attrs else "")
 
 
@@ -64,9 +75,14 @@ def parse_header(line: str) -> dict | None:
     if not m:
         return None
     name, kind, color, timer_on, limit = m.group(1).strip(), "list", "", False, 0
+    client = template = ""
     for word in (m.group(2) or "").split(","):
         w = word.strip().lower()
-        if w in ("checklist", "check list"):
+        if w.startswith("client:"):
+            client = word.split(":", 1)[1].strip()
+        elif w.startswith("template:"):
+            template = word.split(":", 1)[1].strip()
+        elif w in ("checklist", "check list"):
             kind = "checklist"
         elif w in LIST_COLORS:
             color = w
@@ -77,7 +93,8 @@ def parse_header(line: str) -> dict | None:
     if m.group(2) is not None and not name:
         name = m.group(2)
     return {"name": name or "List", "kind": kind, "color": color, "description": "",
-            "timer_on": timer_on or bool(limit), "time_limit": limit, "categories": [], "items": []}
+            "timer_on": timer_on or bool(limit), "time_limit": limit, "categories": [], "items": [],
+            "client": client, "template": template}
 
 
 def render(store: Store, now: dt.datetime | None = None) -> str:
@@ -100,6 +117,8 @@ def render(store: Store, now: dt.datetime | None = None) -> str:
                 fields.append(f"limit: {fmt_limit(it.time_limit)}")
             if it.category:
                 fields.append(f"category: {it.category.replace('|', '/')}")
+            if it.link:
+                fields.append(f"link: {it.link.replace(' | ', ' / ')}")
             lines.append(" | ".join(fields))
             for note_line in it.notes.splitlines():
                 lines.append("    " + note_line)
@@ -145,6 +164,8 @@ def parse(text: str) -> list[dict]:
                     item["time_limit"] = parse_duration(p[6:]) or 0
                 elif low.startswith("category:"):
                     item["category"] = p[9:].strip()
+                elif low.startswith("link:"):
+                    item["link"] = p[5:].strip()
                 elif low == "remind" or low.startswith("remind "):
                     item["reminder"] = True
                     t = p[6:].strip()

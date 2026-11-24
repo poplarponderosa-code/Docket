@@ -13,6 +13,8 @@ Rules, kept simple so they are predictable:
 * A time anywhere (3pm, 3:30 pm, at 9am, @14:00) turns on a reminder at that
   time. With no date, the item is due today. Times with a colon and no am/pm
   are 24-hour, except 1:00-6:59, which are read as afternoon.
+* A web address (https://… or www.…) anywhere becomes the item's link and is
+  taken out of the name.
 * Numeric dates are month/day (11/24 = Nov 24).
 * A date without a year is this year, unless it is more than two months in
   the past, in which case it means next year.
@@ -52,6 +54,7 @@ TIME_RE = re.compile(
     r"|(?<!\S)(?:(?:at|@)\s*)?(\d{1,2}):(\d{2})(?!\S)", re.I)
 SEP_RE = re.compile(r"\s*(?:–|—|\.\.|-)\s*|\s+(?:to|until|till|thru|through)\s+")
 ORD = r"(?:st|nd|rd|th)?"
+URL_RE = re.compile(r"(?<!\S)(?:https?://|www\.)\S+", re.I)
 
 
 @dataclass
@@ -61,6 +64,19 @@ class QuickAdd:
     end: dt.date | None = None
     priority: str | None = None   # "High" | "Med" | "Low"
     remind_time: str | None = None  # "HH:MM"
+    link: str = ""
+
+
+def take_link(text: str) -> tuple[str, str]:
+    """Pull the first web address out of typed text: ('Check https://x.com page' -> ('Check  page', 'https://x.com'))."""
+    m = URL_RE.search(text)
+    if not m:
+        return text, ""
+    url = m.group(0).rstrip(".,;:!?)]}'\"")
+    end = m.end()
+    if url.lower().startswith("www."):
+        url = "https://" + url
+    return " ".join((text[:m.start()] + " " + text[end:]).split()), url
 
 
 def _time_from_match(m: re.Match) -> str | None:
@@ -214,6 +230,7 @@ def parse_date_expr(text: str, today: dt.date) -> tuple[dt.date, dt.date | None]
 def parse_quick_add(text: str, today: dt.date | None = None) -> QuickAdd:
     today = today or dt.date.today()
     priority = None
+    text, link = take_link(text)
 
     def take_priority(m: re.Match) -> str:
         nonlocal priority
@@ -237,8 +254,8 @@ def parse_quick_add(text: str, today: dt.date | None = None) -> QuickAdd:
             name_words = words[:-k]
             while len(name_words) > 1 and name_words[-1].lower() in CONNECTORS:
                 name_words.pop()
-            return QuickAdd(" ".join(name_words), found[0], found[1], priority, remind_time)
+            return QuickAdd(" ".join(name_words), found[0], found[1], priority, remind_time, link)
     name_words = words
     while remind_time and len(name_words) > 1 and name_words[-1].lower() in CONNECTORS:
         name_words = name_words[:-1]
-    return QuickAdd(" ".join(name_words), today if remind_time else None, None, priority, remind_time)
+    return QuickAdd(" ".join(name_words), today if remind_time else None, None, priority, remind_time, link)

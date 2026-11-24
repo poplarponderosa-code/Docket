@@ -22,3 +22,10 @@ def test_stacks_and_aligns_left_edges():
 def test_screen_edges_and_far_away():
     assert snap(7, 1000, 300, 42, [], SCREEN) == (0, 998)              # left and bottom screen edges
     assert snap(900, 600, 300, 42, [(100, 100, 200, 42)], SCREEN) == (900, 600)   # nothing near
+
+
+def test_touching_group():
+    from docket.geometry import touching_group
+    rects = [(0, 0, 100, 40), (100, 0, 100, 40), (200, 41, 50, 40), (500, 500, 10, 10)]
+    assert touching_group(0, rects) == [0, 1, 2]       # a chain counts; 1px gap allowed
+    assert touching_group(3, rects) == [3]

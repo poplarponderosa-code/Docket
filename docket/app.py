@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QAbstractScrollArea, QAbstractSpinBox, QApplicati
                                QProgressDialog,
                                QMenu, QMessageBox, QSystemTrayIcon, QWidget)
 
-from . import __version__, backup, companions, dates, importer, system, themes, updates
+from . import __version__, backup, capture, companions, dates, importer, modes, system, themes, timelogs, updates
 from .store import Store
 from .timer import TimerEngine, fmt_duration
 from .ui.icons import app_icon, dot_icon, refresh_icons
@@ -38,7 +38,27 @@ class WheelGuard(QObject):
         return False
 
 
-HOTKEYS = {1: "hotkey_show", 2: "hotkey_tick", 3: "hotkey_timer"}
+class NativeSink(QWidget):
+    """A hidden window that never changes: shortcuts and lock/sleep notices are tied to it, so they
+    keep working while Docket's visible windows are remade (pill, keep-on-top, Alt+Tab)."""
+
+    def __init__(self, app: "DocketApp"):
+        super().__init__(None, Qt.WindowType.Tool)
+        self.app = app
+        self.setWindowTitle("Docket messages")
+
+    def nativeEvent(self, event_type, message):
+        from .ui.common import win_message
+        msg = win_message(event_type, message)
+        if msg is not None and msg.message in (system.WM_HOTKEY, system.WM_WTSSESSION_CHANGE,
+                                               system.WM_POWERBROADCAST):
+            self.app.handle_native(msg)
+        return super().nativeEvent(event_type, message)
+
+
+HOTKEYS = {1: "hotkey_show", 2: "hotkey_tick", 3: "hotkey_timer", 4: "hotkey_capture"}
+HOTKEY_FEATURE = {"hotkey_show": "shortcuts", "hotkey_tick": "shortcuts", "hotkey_timer": "timer",
+                  "hotkey_capture": "quick_capture"}
 
 DEFAULTS = {
     "theme": "light",
@@ -59,6 +79,13 @@ DEFAULTS = {
     "hotkey_show": "F13", "hotkey_tick": "F14", "hotkey_timer": "F15",
     "auto_update": True, "last_update_check": "", "skip_version": "",
     "last_logs": {},
+    # 1.3.0
+    "mode": None, "setup_done": False,
+    "wrap_items": True, "pill_wrap": False, "show_links": True, "new_list_kind": "checklist",
+    "alt_tab": True, "copy_client": False,
+    "hotkey_capture": "F16", "capture_target": "inbox", "capture_list": None,
+    "capture_fullscreen": "ignore", "last_capture_tab": None,
+    "clear_logs_n": 3, "clear_logs_unit": "months",
 }
 
 
@@ -119,6 +146,10 @@ class DocketApp(QObject):
         self._clock_count = 0
         self.settings = {k: self.store.get_setting(k, v) for k, v in DEFAULTS.items()}
         first_run = not self.store.tabs()
+        self.upgrading = not first_run and not self.settings["mode"]      # from 1.2.x: ask once, Pro picked
+        self.setup_dialog = None
+        self.capture_window = None
+        self._capture_warned = False
         if first_run:
             self._seed()
         for tab in self.store.tabs():                    # lists from before colours existed
@@ -134,6 +165,8 @@ class DocketApp(QObject):
         self.wheel_guard = WheelGuard(self)
         qapp.installEventFilter(self.wheel_guard)
 
+        self.sink = NativeSink(self)
+        self.sink.winId()                         # makes its native window without showing it
         self.main = MainWindow(self)
         self.main.rebuild_tabs(select=self.settings["current_tab"])
         if self.settings["main_geometry"]:
@@ -146,6 +179,7 @@ class DocketApp(QObject):
         menu.addAction("Show Docket", self.show_main)
         menu.addAction("Show all list windows", self.show_all)
         menu.addAction("Quick add…", self.quick_add)
+        self._tray_capture = menu.addAction("Quick capture…", self.open_capture)
         menu.addAction("Import a list…", lambda: self.import_lists(self.main))
         menu.addSeparator()
         menu.addAction("Back up now", lambda: self.backup_now(manual=True))
@@ -194,9 +228,8 @@ class DocketApp(QObject):
         self.update_counts()
         qapp.aboutToQuit.connect(self._shutdown)
 
-        # Windows: shortcuts and lock/unlock notices go to the main window (even while hidden).
-        hwnd = int(self.main.winId())
-        system.watch_session(hwnd)
+        # Windows: shortcuts and lock/unlock notices go to a hidden window that's never remade.
+        system.watch_session(int(self.sink.winId()))
         self.register_hotkeys()
 
         # The checklist timer's clock.
@@ -212,6 +245,9 @@ class DocketApp(QObject):
         self.write_shared()
         self.updater = updates.UpdateChecker(self)
         QTimer.singleShot(20_000, self._auto_update_check)
+        self._sync_mode_bits()
+        if not self.settings["mode"]:
+            QTimer.singleShot(700, self.show_setup)
         if "--updated" in argv:
             QTimer.singleShot(1200, lambda: self.flash(f"Updated to Docket {__version__}"))
 
@@ -250,12 +286,14 @@ class DocketApp(QObject):
                 QTimer.singleShot(0, lambda: dialog.sync_columns())
         elif key == "pill_lines":
             # The new default applies to every pill; their widths and places are kept.
-            sizes = {k: [v[0], 0] + list(v[2:]) for k, v in self.settings["pill_sizes"].items() if v}
+            sizes = {k: [v[0], 0] + list(v[2:4]) for k, v in self.settings["pill_sizes"].items() if v}
             self.settings["pill_sizes"] = sizes
             self.store.set_setting("pill_sizes", sizes)
             for w in self.all_windows():
                 if w.collapsed:
+                    w._pill_count = 0
                     w._resize_myself(QSize(w.width(), w.pill_height(int(value))))
+                    w.fit_pill_height()
                     w.update_pill()
         elif key.startswith("hotkey_"):
             self.register_hotkeys()
@@ -267,11 +305,87 @@ class DocketApp(QObject):
                 w.apply_tint()
         elif key == "reminders":
             pass
+        elif key == "mode":
+            self._sync_mode_bits()
+            for page in self.pages():
+                page.columns_changed()
+            self.main.rebuild_tabs()
+            for w in self.all_windows():
+                w.apply_tint()
+                w.update_pill()
+        elif key in ("wrap_items", "show_links"):
+            for page in self.pages():
+                page.refresh()
+            for w in self.all_windows():
+                w.update_pill()
+        elif key == "pill_wrap":
+            for w in self.all_windows():
+                if w.collapsed:
+                    w.fit_pill_height()
+                    w.update_pill()
+        elif key == "alt_tab":
+            for w in self.all_windows():
+                w.apply_window_flags()
         elif key in ("backup", "backup_dir", "backup_freq"):
             self.main.update_footer()
             if key == "backup" and value:
                 self.dirty = True
                 self._backup_debounce.start()
+
+    # ---- modes ---------------------------------------------------------------------------
+    def mode(self) -> str:
+        m = self.settings.get("mode")
+        return m if m in modes.MODES else "pro"
+
+    def has(self, feature: str) -> bool:
+        return modes.has(self.mode(), feature)
+
+    def tint_on(self) -> bool:
+        return bool(self.settings.get("tab_tint")) and self.has("tab_tint")
+
+    def _sync_mode_bits(self) -> None:
+        if hasattr(self, "_tray_capture"):
+            self._tray_capture.setVisible(self.has("quick_capture"))
+        if hasattr(self, "updater"):
+            self.register_hotkeys()
+
+    def change_mode(self, mode: str) -> None:
+        if mode == self.mode():
+            return
+        self.set_setting("mode", mode)
+        self.flash(f"{modes.LABELS[mode]} mode")
+        if self.settings_dialog is not None:          # rebuild Settings so it shows the new mode's tabs
+            tab = self.settings_dialog.current_tab_key()
+            old, self.settings_dialog = self.settings_dialog, None
+            old.close()
+            old.deleteLater()
+            QTimer.singleShot(0, lambda: self.open_settings(tab))
+
+    def show_setup(self) -> None:
+        from .ui.setup import SetupDialog
+        if self.setup_dialog is not None:
+            self.setup_dialog.raise_()
+            self.setup_dialog.activateWindow()
+            return
+        dialog = SetupDialog(self, upgrading=self.upgrading or bool(self.settings.get("setup_done")),
+                             parent=self.main if self.main.isVisible() else None)
+        self.setup_dialog = dialog
+
+        def done(_result) -> None:
+            self.setup_dialog = None
+            self.upgrading = False
+            dialog.deleteLater()
+
+        dialog.finished.connect(done)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def show_companions(self) -> None:
+        """Companion apps for this mode, with Install buttons: the setup window's second page."""
+        self.show_setup()
+        if self.setup_dialog is not None:
+            self.setup_dialog._go(1)
 
     def pages(self):
         yield from self.main.pages.values()
@@ -315,9 +429,9 @@ class DocketApp(QObject):
     def all_windows(self) -> list:
         return [self.main, *self.popouts.values()]
 
-    def save_pill_rect(self, key: str, width: int, height: int, x: int, y: int) -> None:
+    def save_pill_rect(self, key: str, width: int, height: int, x: int, y: int, count: int = 0) -> None:
         sizes = dict(self.settings["pill_sizes"])
-        sizes[key] = [int(width), int(height), int(x), int(y)]
+        sizes[key] = [int(width), int(height), int(x), int(y), int(count)]
         self.settings["pill_sizes"] = sizes
         self.store.set_setting("pill_sizes", sizes)
 
@@ -330,17 +444,20 @@ class DocketApp(QObject):
         else:
             self.store.set_tab_collapsed(w.tab_id, w.collapsed)
 
-    def open_settings(self) -> None:
+    def open_settings(self, tab: str = "") -> None:
         if self.settings_dialog is None:
-            self.settings_dialog = SettingsDialog(self, self.main)
-            self.settings_dialog.finished.connect(self._settings_closed)
+            dialog = SettingsDialog(self, self.main, tab)
+            self.settings_dialog = dialog
+            dialog.finished.connect(lambda _r=0, d=dialog: self._settings_closed(d))
         else:
             self.settings_dialog.refresh_export_choices()
         self.settings_dialog.show()
         self.settings_dialog.raise_()
         self.settings_dialog.activateWindow()
 
-    def _settings_closed(self) -> None:
+    def _settings_closed(self, dialog=None) -> None:
+        if dialog is not None and dialog is not self.settings_dialog:
+            return
         if self.settings_dialog is not None:
             self.settings_dialog.deleteLater()
             self.settings_dialog = None
@@ -454,8 +571,15 @@ class DocketApp(QObject):
 
     def fill_new_menu(self, menu: QMenu, parent: QWidget) -> None:
         menu.clear()
-        menu.addAction("New priority list", lambda: self.main.new_tab("list"))
-        menu.addAction("New checklist", lambda: self.main.new_tab("checklist"))
+        kinds = [("checklist", "New checklist"), ("list", "New priority list")]
+        if self.settings.get("new_list_kind") == "list":
+            kinds.reverse()
+        for kind, label in kinds:
+            menu.addAction(label, lambda k=kind: self.main.new_tab(k))
+        if not self.has("templates"):
+            menu.addSeparator()
+            menu.addAction("Import a list…", lambda: self.import_lists(parent))
+            return
         tmenu = menu.addMenu("New from template")
         templates = importer.list_templates(self.templates_dir())
         for path in templates:
@@ -481,24 +605,58 @@ class DocketApp(QObject):
             act.setCheckable(True)
             act.setChecked(tab.color == key)
         menu.addAction("Edit description…", lambda: self.edit_description(tab_id))
+        if tab.is_checklist and self.has("client"):
+            menu.addAction(f"Client: {tab.client}…" if tab.client else "Client label…",
+                           lambda: self.set_client(tab_id, parent))
         if any(i.done for i in self.store.items(tab_id)):
             menu.addAction("Clear checked items…", lambda: self.clear_checked(tab_id, parent))
-        if tab.is_checklist:
-            menu.addAction("Categories…", lambda: self._edit_categories(tab_id))
-            menu.addAction("Turn the timer off" if tab.timer_on else "Use a timer",
-                           lambda: self.set_timer_on(tab_id, not tab.timer_on))
-            if tab.timer_on:
-                menu.addAction("Export time log…", lambda: self.save_time_log(tab_id, parent=parent))
-                ledger = companions.get("ledger")
-                installed = companions.find(ledger) is not None
-                menu.addAction("Make a PDF in Ledger…" if installed else "Get Ledger to make PDFs…",
-                               lambda: self.make_pdf(tab_id))
-            menu.addAction("Show as a priority list", lambda: self.store.set_tab_kind(tab_id, "list"))
-            menu.addAction("Reset checklist…", lambda: self.reset_checklist(tab_id, parent))
-            menu.addAction("Save as template…", lambda: self.save_template(tab_id, parent))
-        else:
-            menu.addAction("Show as a checklist", lambda: self.store.set_tab_kind(tab_id, "checklist"))
+        menu.addSeparator()
+        menu.addAction("Copy list", lambda: self.copy_list(tab_id))
+        menu.addAction("Copy as plain text", lambda: self.copy_list(tab_id, plain=True))
         menu.addAction("Export this list…", lambda: self.export_list(tab_id, parent))
+        menu.addSeparator()
+        if tab.is_checklist:
+            if self.has("categories"):
+                menu.addAction("Categories…", lambda: self._edit_categories(tab_id))
+            if self.has("timer"):
+                menu.addAction("Turn the timer off" if tab.timer_on else "Use a timer",
+                               lambda: self.set_timer_on(tab_id, not tab.timer_on))
+                if tab.timer_on:
+                    menu.addAction("Export time log…", lambda: self.save_time_log(tab_id, parent=parent))
+                    if self.has("ledger"):
+                        ledger = companions.get("ledger")
+                        installed = companions.find(ledger) is not None
+                        menu.addAction("Make a PDF in Ledger…" if installed else "Get Ledger to make PDFs…",
+                                       lambda: self.make_pdf(tab_id))
+            menu.addAction("Reset checklist…", lambda: self.reset_checklist(tab_id, parent))
+            if self.has("templates"):
+                menu.addAction("Save as template…", lambda: self.save_template(tab_id, parent))
+            menu.addAction("Switch to priority list", lambda: self.store.set_tab_kind(tab_id, "list"))
+        else:
+            menu.addAction("Switch to checklist", lambda: self.store.set_tab_kind(tab_id, "checklist"))
+
+    def copy_list(self, tab_id: int, plain: bool = False) -> None:
+        tab = self.store.tab(tab_id)
+        if tab is None:
+            return
+        page = self.page_for(tab_id)
+        items = page.sorted_items() if page is not None and not plain else self.store.items(tab_id)
+        if plain:
+            text = importer.plain_text([i for i in items if not i.done] or items)
+        else:
+            text = importer.export_list(tab, items, comments=False,
+                                        include_client=bool(self.settings.get("copy_client")))
+        QApplication.clipboard().setText(text)
+        self.flash(f"Copied “{tab.name}”" + ("" if plain else " (paste it into quick capture to make a copy)"))
+
+    def set_client(self, tab_id: int, parent: QWidget) -> None:
+        tab = self.store.tab(tab_id)
+        if tab is None:
+            return
+        label = ask_client(parent, tab.client, f"Client label for “{tab.name}”")
+        if label is not None and label != tab.client:
+            self.store.update_tab(tab_id, client=label)
+            self.flash(f"Client: {label}" if label else "Client label cleared")
 
     def reset_checklist(self, tab_id: int, parent: QWidget) -> None:
         items = self.store.items(tab_id)
@@ -508,12 +666,30 @@ class DocketApp(QObject):
             self.flash("Nothing to reset yet")
             return
         text = f"Untick all {done} step{'s' if done != 1 else ''}?" if done else "Clear the recorded times?"
-        if timed:
-            text += "\n\nThis also clears the recorded times. Export the time log first if you want to keep it."
-        if confirm(parent, "Reset checklist", text):
-            self.timer.reset(tab_id)
-            self.store.reset_checklist(tab_id)
-            self.flash("Checklist reset")
+        if not timed:
+            if confirm(parent, "Reset checklist", text):
+                self._do_reset(tab_id)
+            return
+        box = QMessageBox(parent)
+        box.setWindowTitle("Reset checklist")
+        box.setText(text + "\n\nThis also clears the recorded times.")
+        export_btn = box.addButton("Export time log and reset", QMessageBox.ButtonRole.AcceptRole)
+        reset_btn = box.addButton("Reset", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(export_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == export_btn:
+            if self.save_time_log(tab_id, parent=parent) is None:
+                return
+            self._do_reset(tab_id)
+        elif clicked == reset_btn:
+            self._do_reset(tab_id)
+
+    def _do_reset(self, tab_id: int) -> None:
+        self.timer.reset(tab_id)
+        self.store.reset_checklist(tab_id)
+        self.flash("Checklist reset")
 
     # ---- the checklist timer -----------------------------------------------------------------
     def page_for(self, tab_id: int):
@@ -565,6 +741,17 @@ class DocketApp(QObject):
         if not on and tab.timer_running:
             self.timer.pause(tab_id)
         self.store.update_tab(tab_id, timer_on=on)
+
+    def open_link(self, link: str) -> None:
+        from . import links
+        link = links.normalize(link)
+        kind = links.kind(link)
+        if kind == "web":
+            QDesktopServices.openUrl(QUrl(link))
+        elif kind in ("folder", "file"):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(link))
+        elif kind == "missing":
+            self.flash(f"Couldn't find {link}")
 
     def edit_description(self, tab_id: int) -> None:
         page = self.page_for(tab_id)
@@ -691,11 +878,31 @@ class DocketApp(QObject):
             self.offer_resume(ids, "while your PC was locked")
 
     def register_hotkeys(self) -> None:
-        hwnd = int(self.main.winId())
+        hwnd = int(self.sink.winId())
         for hotkey_id, key in HOTKEYS.items():
-            self.hotkey_status[key] = system.register_hotkey(hwnd, hotkey_id, self.settings[key])
+            if self.has(HOTKEY_FEATURE[key]) and self.has("shortcuts"):
+                self.hotkey_status[key] = system.register_hotkey(hwnd, hotkey_id, self.settings[key])
+            else:
+                system.unregister_hotkey(hwnd, hotkey_id)
+                self.hotkey_status[key] = ""
         if self.settings_dialog is not None:
             self.settings_dialog.sync_hotkey_status()
+        problem = self.hotkey_status.get("hotkey_capture", "")
+        if problem and self.has("quick_capture") and not self._capture_warned and self.settings.get("mode"):
+            self._capture_warned = True
+            QTimer.singleShot(2500, lambda: self._warn_capture_key(problem))
+
+    def _warn_capture_key(self, problem: str) -> None:
+        box = QMessageBox(self.main if self.main.isVisible() else None)
+        box.setWindowTitle("Quick capture")
+        box.setText(f"The quick capture shortcut ({self.settings['hotkey_capture']}) couldn't be set up: "
+                    f"{problem.lower()}.\n\nChoose another key in Settings > Shortcuts.")
+        open_btn = box.addButton("Open Settings", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Not now", QMessageBox.ButtonRole.RejectRole)
+        box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        box.exec()
+        if box.clickedButton() == open_btn:
+            self.open_settings("shortcuts")
 
     def note_active(self, window) -> None:
         page = window.pill_page()
@@ -712,7 +919,12 @@ class DocketApp(QObject):
 
     def on_hotkey(self, hotkey_id: int) -> None:
         key = HOTKEYS.get(hotkey_id)
-        if key == "hotkey_show":
+        if key == "hotkey_capture":
+            if self.settings.get("capture_fullscreen", "ignore") == "ignore" and \
+                    system.foreground_is_fullscreen(tuple(int(w.winId()) for w in self.all_windows())):
+                return
+            self.open_capture()
+        elif key == "hotkey_show":
             if self.main.isVisible() and self.main.isActiveWindow() and not self.main.isMinimized():
                 self.main.hide()
             else:
@@ -737,6 +949,46 @@ class DocketApp(QObject):
                 self.flash("The timer is for checklists")
                 return
             self.toggle_timer(tab_id)
+
+    # ---- quick capture -----------------------------------------------------------------------
+    def open_capture(self) -> None:
+        if not self.has("quick_capture"):
+            self.quick_add()
+            return
+        if self.capture_window is None:
+            from .ui.capture import CaptureWindow
+            self.capture_window = CaptureWindow(self)
+        self.capture_window.open()
+
+    def find_inbox(self):
+        return next((t for t in self.store.tabs() if t.name.strip().casefold() == capture.INBOX.casefold()), None)
+
+    def inbox_id(self) -> int:
+        """The Inbox list, made the first time something is captured into it."""
+        tab = self.find_inbox()
+        if tab is None:
+            tab = self.store.add_tab(capture.INBOX, kind="list", color=self.next_color())
+        return tab.id
+
+    def note_capture(self, tab_id: int) -> None:
+        self.settings["last_capture_tab"] = tab_id
+        self.store.set_setting("last_capture_tab", tab_id)
+
+    # ---- clearing time logs -------------------------------------------------------------------
+    def clear_time_logs(self, older_than_days: int | None, parent: QWidget, label: str = "") -> None:
+        files = timelogs.to_clear(self.timelog_dir(), older_than_days)
+        if not files:
+            self.flash("No time logs to clear" if older_than_days is None else f"No time logs older than {label}")
+            QMessageBox.information(parent, "Clear time logs", "There are no time logs to clear."
+                                    if older_than_days is None else f"No time logs are older than {label}.")
+            return
+        what = "every time log" if older_than_days is None else f"time logs older than {label}"
+        if not confirm(parent, "Clear time logs",
+                       f"Delete {what} ({len(files)} file{'s' if len(files) != 1 else ''}) from\n"
+                       f"{self.timelog_dir()}?\n\nThis can't be undone. Only Docket's own time logs are deleted."):
+            return
+        gone = timelogs.clear(files)
+        self.flash(f"Deleted {gone} time log file{'s' if gone != 1 else ''}")
 
     # ---- updates -------------------------------------------------------------------------------
     def _auto_update_check(self) -> None:
@@ -864,6 +1116,9 @@ class DocketApp(QObject):
             return
         if not data.get("color"):
             data["color"] = self.next_color()
+        if self.has("client"):
+            label = ask_client(parent, "", f"Client for “{data.get('name') or path.stem}”", skippable=True)
+            data["client"] = label or ""
         made = self.store.add_lists([data])
         if made:
             self.main.rebuild_tabs(select=made[0].id)
@@ -938,13 +1193,21 @@ class DocketApp(QObject):
     def fill_app_menu(self, menu: QMenu, parent: QWidget) -> None:
         """The D logo's menu. Each companion app gets an Open (or Get…) line."""
         menu.clear()
-        for comp in companions.COMPANIONS:
+        added = False
+        for comp in companions.for_mode(self.mode()):
             installed = companions.find(comp) is not None
             act = menu.addAction(f"Open {comp.name}" if installed else f"Get {comp.name}…",
                                  lambda c=comp.key: self.open_companion(c))
             act.setToolTip(comp.full_name)
-        menu.addAction("Open time logs folder", self.open_timelogs)
-        menu.addSeparator()
+            added = True
+        if self.has("timelogs"):
+            menu.addAction("Open time logs folder", self.open_timelogs)
+            added = True
+        if self.has("quick_capture"):
+            menu.addAction(f"Quick capture ({self.settings['hotkey_capture'] or 'no shortcut'})", self.open_capture)
+            added = True
+        if added:
+            menu.addSeparator()
         menu.addAction("Settings", self.open_settings)
         menu.addAction("Check for updates", lambda: self.check_for_updates(True, parent))
         menu.addSeparator()
@@ -1215,7 +1478,7 @@ class DocketApp(QObject):
         self.quitting = True
         try:
             self.timer.heartbeat()
-            hwnd = int(self.main.winId())
+            hwnd = int(self.sink.winId())
             for hotkey_id in HOTKEYS:
                 system.unregister_hotkey(hwnd, hotkey_id)
         except Exception:
@@ -1227,6 +1490,9 @@ class DocketApp(QObject):
         for w in list(self.popouts.values()):
             w.closing_for_good = True
             w.close()
+        if self.capture_window is not None:
+            self.capture_window.hide()
+            self.capture_window.toast.hide()
         if self.settings["backup"] and self.dirty:
             try:
                 backup.write_backup(self.store, self.backup_dir(), int(self.settings["backup_keep"]))
@@ -1235,6 +1501,20 @@ class DocketApp(QObject):
                 pass
         self.tray.hide()
         self.store.close()
+
+
+def ask_client(parent: QWidget | None, current: str, title: str, skippable: bool = False) -> str | None:
+    """A client label (a short name, never contact details). None = cancelled."""
+    from PySide6.QtWidgets import QInputDialog
+    tip = ("A short label for who this work is for, like “Acme”. It goes into the time log so Ledger "
+           "knows the client; their details stay in Ledger.\n"
+           "Use this field instead of putting client names in the checklist title.")
+    if skippable:
+        tip += "\n\nLeave it empty to skip."
+    text, ok = QInputDialog.getText(parent, title, tip, text=current)
+    if not ok:
+        return "" if skippable else None
+    return " ".join(text.split())[:60]
 
 
 # ---------------------------------------------------------------------------------

@@ -16,11 +16,12 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QLi
                                QPushButton, QSizeGrip, QStackedWidget, QStyle, QStyleOptionTab, QStylePainter,
                                QTabBar, QToolButton, QVBoxLayout, QWidget)
 
-from .. import dates, themes
-from ..geometry import snap
+from .. import dates, links, system, themes
+from ..geometry import snap, touching_group
 from ..store import Item
 from .common import (SIDE_EDGES, WM_NCLBUTTONDBLCLK, ClickableWidget, ElideLabel, TitleBar, edge_hit_test,
                      round_corners, set_prop, win_message)
+from .common import ClickLabel  # noqa: F401  (kept for subclasses)
 from .icons import apply_icon, app_icon, dot_icon, icon_button, set_icon_name, tinted_checkbox_qss
 from .listpage import ListPage, open_count
 
@@ -108,7 +109,7 @@ class ColorTabBar(QTabBar):
         return tab.color if tab else ""
 
     def paintEvent(self, e) -> None:
-        if not self.app.settings.get("tab_tint"):
+        if not self.app.tint_on():
             super().paintEvent(e)
             return
         p = QStylePainter(self)
@@ -145,7 +146,11 @@ class DocketWindow(QWidget):
     pin_btn: QToolButton
 
     def __init__(self, app: "DocketApp", flags, pill_key: str, min_size: QSize):
+        if app.settings.get("alt_tab", True):        # a normal window shows in Alt+Tab; its taskbar button
+            flags = Qt.WindowType.Window             # is taken off again each time it's shown
         super().__init__(None, flags | FRAMELESS)
+        self._drag_group: list | None = None
+        self._pill_count = 0                     # items a wrapping pill shows (0 = from the settings)
         self.app = app
         self.pill_key = pill_key
         self.min_size = min_size
@@ -194,6 +199,34 @@ class DocketWindow(QWidget):
         self.pill_ledger.clicked.connect(self._pill_ledger_clicked)
         self.pill_ledger.hide()
         self.title._lay.insertWidget(self.title._lay.indexOf(self.title.extra) + 1, self.pill_ledger)
+        # The top item's link, on the pill.
+        self.pill_link = icon_button("globe", "Open the link", size=24)
+        self.pill_link.clicked.connect(self._pill_link_clicked)
+        self.pill_link.hide()
+        self.title._lay.insertWidget(self.title._lay.indexOf(self.title.name) + 1, self.pill_link)
+        # Click the time on a pill to give the step a time limit.
+        self.title.extra.installEventFilter(self)
+        self.title.drag_released.connect(lambda _pos: self._end_group())
+
+    def eventFilter(self, obj, ev) -> bool:
+        if obj is self.title.extra and ev.type() == QEvent.Type.MouseButtonPress and self.collapsed:
+            page = self.pill_page()
+            if page is not None and page.timer_on and self._pill_top_id is not None:
+                QTimer.singleShot(0, lambda tid=self._pill_top_id: page.set_step_limit(tid))
+                return True
+        return super().eventFilter(obj, ev)
+
+    def _pill_link_clicked(self) -> None:
+        item = self.app.store.item(self._pill_top_id) if self._pill_top_id is not None else None
+        if item is not None:
+            self.app.open_link(item.link)
+
+    def checklist_finished(self) -> bool:
+        page = self.pill_page()
+        if page is None or not page.is_checklist:
+            return False
+        done, total = page.progress()
+        return bool(total) and done == total
 
     def _pill_ledger_clicked(self) -> None:
         page = self.pill_page()
@@ -204,17 +237,21 @@ class DocketWindow(QWidget):
         page = self.pill_page()
         tab = self.app.store.tab(page.tab_id) if page is not None else None
         self.pill_ledger.setVisible(bool(self.collapsed and tab is not None and tab.is_checklist
-                                         and tab.timer_on and tab.timer_finished))
+                                         and page.timer_on and tab.timer_finished and self.app.has("ledger")))
 
     def _pill_play_clicked(self) -> None:
         page = self.pill_page()
-        if page is not None:
+        if page is None:
+            return
+        if self.checklist_finished():                  # nothing left to time: the button resets instead
+            self.app.reset_checklist(page.tab_id, self)
+        else:
             self.app.toggle_timer(page.tab_id)
 
     def _button_allowed(self, b: QWidget) -> bool:
         if b is getattr(self, "pill_play", None):
             page = self.pill_page()
-            return self.collapsed and page is not None and page.timer_on
+            return self.collapsed and page is not None and (page.timer_on or self.checklist_finished())
         if b in self.pill_only:
             return self.collapsed
         return True
@@ -224,9 +261,47 @@ class DocketWindow(QWidget):
         lines = max(1, min(3, lines))
         return self.title.height() + 2 + (lines - 1) * PILL_LINE_H + (6 if lines > 1 else 0)
 
+    def pill_wraps(self) -> bool:
+        return bool(self.app.settings.get("pill_wrap", False))
+
+    def pill_count(self) -> int:
+        """How many items the pill shows: from its height, or (when wrapping) remembered."""
+        if self.pill_wraps():
+            return self._pill_count or int(self.app.settings.get("pill_lines", 1))
+        one = self.pill_height(1)
+        return max(1, min(3, round((self.height() - one) / PILL_LINE_H) + 1))
+
+    def fit_pill_height(self) -> None:
+        """Wrapping pills: grow or shrink to fit their items exactly."""
+        if not self.collapsed:
+            return
+        if not self.pill_wraps():
+            self.title.setFixedHeight(40)
+            self.setMaximumHeight(self.pill_height(3))
+            self.snap_height()
+            return
+        self.update_pill()
+        lines = sum(w.height() for w in self._pill_lines)
+        want = self.title.height() + 2 + lines + (6 if self._pill_lines else 0)
+        self.setMaximumHeight(QT_MAX)
+        if self.height() != want:
+            self._resize_myself(QSize(self.width(), want))
+
     def snap_height(self) -> None:
         """A pill is always exactly 1, 2 or 3 items tall."""
         if not self.collapsed:
+            return
+        if self.pill_wraps():
+            # Dragging the bottom edge of a wrapping pill adds or removes an item.
+            fitted = self.title.height() + 2 + sum(w.height() for w in self._pill_lines) + \
+                (6 if self._pill_lines else 0)
+            count = self.pill_count()
+            if self.height() > fitted + 12:
+                count += 1
+            elif self.height() < fitted - 12:
+                count -= 1
+            self._pill_count = max(1, min(3, count))
+            QTimer.singleShot(0, self.fit_pill_height)
             return
         one = self.pill_height(1)
         lines = max(1, min(3, round((self.height() - one) / PILL_LINE_H) + 1))
@@ -235,16 +310,38 @@ class DocketWindow(QWidget):
             self._resize_myself(QSize(self.width(), want))
 
     def drag_to(self, pos: QPoint) -> None:
-        """Move while dragging by the title; pills snap to other windows and screen edges."""
+        """Move while dragging by the title; pills snap to other windows and screen edges.
+        Holding Ctrl moves every pill snapped to this one along with it."""
+        group = self._group_for_drag()
         if self.collapsed and self.app.settings.get("snap_pills", True):
-            pos = self._snapped(pos)
+            pos = self._snapped(pos, exclude=group)
+        delta = pos - self.pos()
         self.move(pos)
+        for win in group:
+            win.move(win.pos() + delta)
 
-    def _snapped(self, pos: QPoint) -> QPoint:
+    def _group_for_drag(self) -> list:
+        ctrl = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
+        if not self.collapsed or not ctrl:
+            return []
+        if self._drag_group is None:
+            pills = [w for w in self.app.all_windows() if w.collapsed and w.isVisible() and not w.isMinimized()]
+            if self not in pills:
+                return []
+            rects = [(w.x(), w.y(), w.width(), w.height()) for w in pills]
+            members = touching_group(pills.index(self), rects)
+            self._drag_group = [pills[i] for i in members if pills[i] is not self]
+        return self._drag_group
+
+    def _end_group(self) -> None:
+        self._drag_group = None
+
+    def _snapped(self, pos: QPoint, exclude: list | None = None) -> QPoint:
         w, h = self.width(), self.height()
         others = []
+        skip = exclude or []
         for win in self.app.all_windows():
-            if win is not self and win.isVisible() and not win.isMinimized():
+            if win is not self and win not in skip and win.isVisible() and not win.isMinimized():
                 g = win.frameGeometry()
                 others.append((g.left(), g.top(), g.width(), g.height()))
         screen = QGuiApplication.screenAt(pos + QPoint(w // 2, h // 2)) or self.screen()
@@ -309,6 +406,9 @@ class DocketWindow(QWidget):
         if not self._rounded:
             round_corners(self)
             self._rounded = True
+        if self.windowType() != Qt.WindowType.Tool:
+            QTimer.singleShot(0, lambda: system.hide_taskbar_button(int(self.winId())))
+            QTimer.singleShot(400, lambda: system.hide_taskbar_button(int(self.winId())))
 
     def enterEvent(self, e) -> None:
         super().enterEvent(e)
@@ -323,12 +423,26 @@ class DocketWindow(QWidget):
                 b.hide()
 
     def set_on_top(self, on: bool) -> None:
-        if bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint) == on:
+        self.apply_window_flags(on)
+
+    def apply_window_flags(self, on_top: bool | None = None) -> None:
+        """Keep-on-top, and Alt+Tab: full windows are normal windows (in Alt+Tab, no taskbar button),
+        pills are tool windows (never in Alt+Tab)."""
+        on_top = self.wants_on_top() if on_top is None else on_top
+        want_tool = self.collapsed or not self.app.settings.get("alt_tab", True)
+        is_tool = self.windowType() == Qt.WindowType.Tool
+        has_top = bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+        if is_tool == want_tool and has_top == on_top:
             return
         visible = self.isVisible()
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
+        flags = FRAMELESS | (Qt.WindowType.Tool if want_tool else Qt.WindowType.Window)
+        if on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        geo = self.geometry()
+        self.setWindowFlags(flags)
         self._rounded = False          # Windows makes a new native window
         if visible:
+            self.setGeometry(geo)
             self.show()
 
     def wants_on_top(self) -> bool:
@@ -363,7 +477,7 @@ class DocketWindow(QWidget):
 
     def apply_tint(self) -> None:
         """With whole-tab colour on, the pill (and a list window's title bar) wear the list's colour."""
-        on = bool(self.app.settings.get("tab_tint")) and (self.collapsed or self.tint_title_when_open)
+        on = self.app.tint_on() and (self.collapsed or self.tint_title_when_open)
         css = f"background: {themes.tint(self.list_key(), 0.32)};" if on else ""
         self.title.setStyleSheet(f"#TitleBar {{ {css} }}" if css else "")
         self.pill_list.setStyleSheet(f"#PillList {{ {css} }}" if css and self.collapsed else "")
@@ -408,7 +522,12 @@ class DocketWindow(QWidget):
             saved = self.app.pill_rect(self.pill_key)
             default_h = self.pill_height(int(self.app.settings.get("pill_lines", 1)))
             self._resize_myself(QSize(saved[0], saved[1] or default_h) if saved else QSize(self.width(), default_h))
-            self.snap_height()
+            if saved and len(saved) >= 5:
+                self._pill_count = int(saved[4])
+            if self.pill_wraps():
+                QTimer.singleShot(0, self.fit_pill_height)
+            else:
+                self.snap_height()
             for b in self.pill_buttons + [self.pill_play]:
                 b.setVisible(self.underMouse() and self._button_allowed(b))
             self.title.strip.show()
@@ -416,6 +535,9 @@ class DocketWindow(QWidget):
             self.pill_list.hide()
             self.body.show()
             self.collapsed = False
+            self.title.setFixedHeight(40)
+            self.title.name.set_wrap(False)
+            self.pill_link.hide()
             self.setMaximumHeight(QT_MAX)
             self.setMinimumSize(self.min_size)
             self.resize(self._full_size or QSize(440, 640))
@@ -464,7 +586,7 @@ class DocketWindow(QWidget):
         if self.collapsed:
             self.snap_height()
             width = self._pill_set_w if self._pill_wide and self._pill_set_w else self.width()
-            self.app.save_pill_rect(self.pill_key, width, self.height(), self.x(), self.y())
+            self.app.save_pill_rect(self.pill_key, width, self.height(), self.x(), self.y(), self.pill_count())
 
     def toggle_pill_width(self) -> None:
         """Double-click a pill's side edge: widen to fit the whole item, then back again."""
@@ -510,9 +632,21 @@ class DocketWindow(QWidget):
             return
         item = next((i for i in page.sorted_items() if not i.done), None)
         if item is not None:
-            text, status, _tip = page.time_text(item)
+            text, status, tip = page.time_text(item, pill=True)
             self.title.extra.setText(text)
+            self.title.extra.setToolTip(tip)
+            self.title.extra.setCursor(Qt.CursorShape.PointingHandCursor)
             set_prop(self.title.extra, "status", {"over": "overdue", "running": "today"}.get(status, "none"))
+        self._sync_pill_play()
+
+    def _sync_pill_play(self) -> None:
+        page = self.pill_page()
+        if page is None:
+            return
+        if self.checklist_finished():
+            set_icon_name(self.pill_play, "reset")
+            self.pill_play.setToolTip("Reset the checklist to start again")
+            return
         tab = self.app.store.tab(page.tab_id)
         running = bool(tab and tab.timer_running)
         set_icon_name(self.pill_play, "pause" if running else "play")
@@ -535,11 +669,20 @@ class DocketWindow(QWidget):
         if checklist:
             done, total = page.progress()
             progress = f"{done} of {total}" if total else ""
+        wrap = self.pill_wraps()
+        self.title.name.set_wrap(wrap)
+        self.title.extra.unsetCursor()
+        self.title.extra.setToolTip("")
         if items:
             top = items[0]
             self._pill_top_id = top.id
             self.title.check.show()
             self.title.name.setFullText(top.name)
+            show_link = bool(top.link) and bool(self.app.settings.get("show_links", True))
+            self.pill_link.setVisible(show_link)
+            if show_link:
+                set_icon_name(self.pill_link, links.icon_name(top.link) or "globe")
+                self.pill_link.setToolTip("Open " + top.link)
             if checklist and page.timer_on:
                 self.update_pill_time()
             elif checklist:
@@ -552,6 +695,7 @@ class DocketWindow(QWidget):
             self.title.setToolTip(f"{top.name}\nTick the box when it's done. Double-click to open the list.")
         else:
             self._pill_top_id = None
+            self.pill_link.hide()
             self.title.check.hide()
             self.title.name.setFullText("All done" if checklist and progress else "All clear")
             self.title.extra.setText(progress)
@@ -565,7 +709,16 @@ class DocketWindow(QWidget):
         self._pill_lines, self._line_widths = [], []
         while self._pill_lay.count():
             self._pill_lay.takeAt(0)
-        room = max(0, (self.height() - self.title.height() - 8) // PILL_LINE_H)
+        if wrap:
+            # The title grows to fit the whole top item; each line below fits its own item.
+            reserved = 5 + 10 + 24 + 8 + 6 + 4 + 12 + self.title.extra.sizeHint().width() + \
+                sum(b.width() + 2 for b in (self.pill_link, self.pill_ledger) if b.isVisible())
+            name_w = max(60, self.width() - reserved - 8)
+            self.title.setFixedHeight(max(40, self.title.name.needed_height(name_w) + 18))
+            room = self.pill_count() - 1
+        else:
+            self.title.setFixedHeight(40)
+            room = max(0, (self.height() - self.title.height() - 8) // PILL_LINE_H)
         fm = self.title.name.fontMetrics()
         for it in items[1:1 + room]:
             line, label = self._pill_line(it, today, color, checklist)
@@ -575,6 +728,7 @@ class DocketWindow(QWidget):
                                      + fm.horizontalAdvance(label) + 30)
         self._pill_lay.addStretch(1)
         self._sync_pill_ledger()
+        self._sync_pill_play()
         self.apply_tint()
 
     def _pill_line(self, it: Item, today: dt.date, color: str, checklist: bool) -> tuple[QWidget, str]:
@@ -593,6 +747,11 @@ class DocketWindow(QWidget):
         item_id = it.id
         check.toggled.connect(lambda on: on and self.app.set_done(item_id, True))
         name = ElideLabel(it.name)
+        wrap = self.pill_wraps()
+        if wrap:
+            name.set_wrap(True)
+            name_w = max(60, self.width() - 15 - 10 - 24 - 10 - 60)
+            line.setFixedHeight(max(PILL_LINE_H, name.needed_height(name_w) + 8))
         label = ""
         if not checklist and it.due:
             due, end = dates.from_iso(it.due), dates.from_iso(it.end)
@@ -601,9 +760,13 @@ class DocketWindow(QWidget):
         when.setObjectName("Due")
         if not checklist and it.due:
             when.setProperty("status", dates.status(dates.from_iso(it.due), dates.from_iso(it.end), False, today))
-        h.addWidget(check)
+        h.addWidget(check, 0, Qt.AlignmentFlag.AlignTop if wrap else Qt.AlignmentFlag.AlignVCenter)
         h.addWidget(name, 1)
-        h.addWidget(when)
+        if it.link and self.app.settings.get("show_links", True):
+            lk = icon_button(links.icon_name(it.link) or "globe", "Open " + it.link, size=22)
+            lk.clicked.connect(lambda _=False, link=it.link: self.app.open_link(link))
+            h.addWidget(lk, 0, Qt.AlignmentFlag.AlignTop if wrap else Qt.AlignmentFlag.AlignVCenter)
+        h.addWidget(when, 0, Qt.AlignmentFlag.AlignTop if wrap else Qt.AlignmentFlag.AlignVCenter)
         return line, label
 
 
@@ -676,13 +839,13 @@ class MainWindow(DocketWindow):
         self.tabs.installEventFilter(self)
         self._drag_tid: int | None = None
         tr.addWidget(self.tabs, 0, Qt.AlignmentFlag.AlignBottom)
-        self.add_tab_btn = icon_button("plus", "New priority list (arrow: checklist or template)", size=28)
+        self.add_tab_btn = icon_button("plus", "New list (the arrow has more choices)", size=28)
         self.add_tab_btn.setFixedSize(42, 28)
         self.add_tab_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         new_menu = QMenu(self.add_tab_btn)
         new_menu.aboutToShow.connect(lambda: app.fill_new_menu(new_menu, self))
         self.add_tab_btn.setMenu(new_menu)
-        self.add_tab_btn.clicked.connect(lambda: self.new_tab("list"))
+        self.add_tab_btn.clicked.connect(lambda: self.new_tab(app.settings.get("new_list_kind", "checklist")))
         tr.addWidget(self.add_tab_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         tr.addStretch(1)
         body.addWidget(self.tab_row)
@@ -743,12 +906,6 @@ class MainWindow(DocketWindow):
         self.retheme()
 
     # ---- window behaviour ------------------------------------------------------------
-    def nativeEvent(self, event_type, message):
-        msg = win_message(event_type, message)
-        if msg is not None and msg.message in (0x0312, 0x02B1, 0x0218):   # shortcut, lock, sleep
-            self.app.handle_native(msg)
-        return super().nativeEvent(event_type, message)
-
     def closeEvent(self, e: QCloseEvent) -> None:
         if self.app.quitting:
             e.accept()
@@ -875,7 +1032,7 @@ class MainWindow(DocketWindow):
                 self.pages[t.id].sync_kind()
             i = self.tabs.addTab(t.name)
             self.tabs.setTabData(i, t.id)
-            self.tabs.setTabIcon(i, QIcon() if self.app.settings.get("tab_tint")
+            self.tabs.setTabIcon(i, QIcon() if self.app.tint_on()
                                  else dot_icon(themes.list_color(t.color), 10))
             btn = icon_button("popout", "Open in its own window (or drag the tab out)", size=22)
             btn.clicked.connect(lambda _=False, tid=t.id: self.app.pop_out(tid))
@@ -897,7 +1054,7 @@ class MainWindow(DocketWindow):
                 set_icon_name(btn, "popout")
             tab = self.app.store.tab(self.tabs.tabData(i))
             if tab:
-                self.tabs.setTabIcon(i, QIcon() if self.app.settings.get("tab_tint")
+                self.tabs.setTabIcon(i, QIcon() if self.app.tint_on()
                                      else dot_icon(themes.list_color(tab.color), 10))
         self.tabs.update()
 

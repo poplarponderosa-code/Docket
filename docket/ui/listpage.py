@@ -11,17 +11,19 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QGridLayou
                                QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
                                QScrollArea, QSizePolicy, QTimeEdit, QVBoxLayout, QWidget)
 
-from .. import dates, themes
-from ..parser import parse_quick_add
+from .. import dates, links, themes
+from ..parser import parse_quick_add, take_link
 from ..timer import fmt_duration, fmt_limit, parse_duration
 from ..store import PRIORITIES, Item
-from .common import ClickableWidget, ElideLabel, OptionalDateEdit, repolish, set_prop
+from .common import ClickableWidget, ClickLabel, ElideLabel, OptionalDateEdit, repolish, set_prop
 from .icons import dot_icon, icon_button, make_icon, set_icon_name
 
 if TYPE_CHECKING:
     from ..app import DocketApp
 
 DUE_W, PRI_W, CHECK_W, CHEV_W, TIME_W, PLAY_W, CAT_W = 92, 70, 20, 28, 92, 26, 100
+CELL_H = 28            # height of the cells beside a wrapped name, so they line up with its first line
+EDGE_PX, MAX_SCROLL = 36, 22   # dragging a step near the list's top or bottom edge scrolls it
 NEW_CATEGORY, EDIT_CATEGORIES = "\x00new", "\x00edit"
 ROW_MIME = "application/x-docket-item"
 COLUMN_TITLES = {"due": "DUE", "item": "ITEM", "pri": "PRIORITY"}
@@ -247,7 +249,7 @@ class DescriptionPopup(QFrame):
 class CategoriesDialog(QDialog):
     """Add, rename (double-click) or remove a checklist's categories."""
 
-    def __init__(self, parent: QWidget, names: list[str]):
+    def __init__(self, parent: QWidget, names: list[str], others: list[tuple[str, list[str]]] | None = None):
         super().__init__(parent)
         self.setWindowTitle("Categories")
         self.resize(320, 360)
@@ -264,6 +266,16 @@ class CategoriesDialog(QDialog):
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
             self.list.addItem(item)
         lay.addWidget(self.list, 1)
+        self.others = [(n, c) for n, c in (others or []) if c]
+        if self.others:
+            copy_row = QHBoxLayout()
+            self.copy_box = QComboBox()
+            self.copy_box.addItem("Copy from another checklist…", None)
+            for i, (name, cats) in enumerate(self.others):
+                self.copy_box.addItem(f"{name}  ({len(cats)})", i)
+            self.copy_box.activated.connect(self._copy_from)
+            copy_row.addWidget(self.copy_box, 1)
+            lay.addLayout(copy_row)
         row = QHBoxLayout()
         add = QPushButton("Add")
         add.clicked.connect(self._add)
@@ -277,6 +289,21 @@ class CategoriesDialog(QDialog):
         row.addStretch(1)
         row.addWidget(done)
         lay.addLayout(row)
+
+    def _copy_from(self, index: int) -> None:
+        """Add the other checklist's categories that this one doesn't have yet."""
+        which = self.copy_box.itemData(index)
+        self.copy_box.setCurrentIndex(0)
+        if which is None:
+            return
+        have = {self.list.item(i).text().strip() for i in range(self.list.count())}
+        for name in self.others[which][1]:
+            if name not in have:
+                item = QListWidgetItem(name)
+                item.setData(Qt.ItemDataRole.UserRole, "")
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+                self.list.addItem(item)
+                have.add(name)
 
     def _add(self) -> None:
         item = QListWidgetItem("New category")
@@ -344,19 +371,29 @@ class ItemRow(QFrame):
         self.due.setObjectName("Due")
         self.due.setFixedWidth(DUE_W)
 
+        self.wrap = bool(self.app.settings.get("wrap_items", True))
         self.name_cell = QWidget()
         nc = QHBoxLayout(self.name_cell)
-        nc.setContentsMargins(0, 8, 0, 8)
+        nc.setContentsMargins(0, 5 if self.wrap else 8, 0, 5 if self.wrap else 8)
         nc.setSpacing(6)
         self.name = ElideLabel()
         self.name.setObjectName("Name")
+        self.name.set_wrap(self.wrap)
+        self.link_btn = icon_button("globe", "Open the link", size=22)
+        self.link_btn.clicked.connect(lambda: self.app.open_link(self.item.link))
+        self.link_btn.hide()
         self.notes_icon = QLabel()
         self.bell_icon = QLabel()
         self.notes_icon.setToolTip("Has notes")
         self.bell_icon.setToolTip("Reminder on")
         nc.addWidget(self.name, 1)
-        nc.addWidget(self.notes_icon)
-        nc.addWidget(self.bell_icon)
+        nc.addWidget(self.link_btn, 0, Qt.AlignmentFlag.AlignTop if self.wrap else Qt.AlignmentFlag.AlignVCenter)
+        nc.addWidget(self.notes_icon, 0, Qt.AlignmentFlag.AlignTop if self.wrap else Qt.AlignmentFlag.AlignVCenter)
+        nc.addWidget(self.bell_icon, 0, Qt.AlignmentFlag.AlignTop if self.wrap else Qt.AlignmentFlag.AlignVCenter)
+        if self.wrap:
+            self.name.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            for icon in (self.notes_icon, self.bell_icon):
+                icon.setFixedHeight(self.fontMetrics().height() + 2)
 
         self.pri = QPushButton()
         self.pri.setObjectName("Pri")
@@ -382,6 +419,9 @@ class ItemRow(QFrame):
                 self.cat_lbl = ElideLabel(item.category)
                 self.cat_lbl.setObjectName("CategoryCell")
                 self.cat_lbl.setFixedWidth(CAT_W)
+                self.cat_lbl.clickable = True
+                self.cat_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+                self.cat_lbl.clicked.connect(self._category_menu)
                 top.addWidget(self.cat_lbl)
             if page.timer_on:
                 self.play_btn = icon_button("play", "Time this step", size=PLAY_W)
@@ -390,7 +430,10 @@ class ItemRow(QFrame):
                 self.play_btn.setSizePolicy(keep)
                 self.play_btn.hide()                     # appears when the mouse is over the row
                 self.play_btn.clicked.connect(lambda: self.app.play_item(self.item.tab_id, self.item.id))
-                self.time_lbl = QLabel()
+                self.time_lbl = ClickLabel()
+                self.time_lbl.clickable = True
+                self.time_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+                self.time_lbl.clicked.connect(lambda: self.page.set_step_limit(self.item.id))
                 self.time_lbl.setObjectName("TimeCell")
                 self.time_lbl.setFixedWidth(TIME_W)
                 self.time_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -403,6 +446,15 @@ class ItemRow(QFrame):
             if "pri" not in page.visible_columns():
                 self.pri.hide()
         top.addWidget(self.chev)
+        if self.wrap:                      # long names wrap: everything else lines up with the first line
+            top.setContentsMargins(12, 6, 8, 6)
+            for i in range(top.count()):
+                w = top.itemAt(i).widget()
+                if w is None or w is self.name_cell:
+                    continue
+                top.setAlignment(w, Qt.AlignmentFlag.AlignTop)
+                if not isinstance(w, QPushButton) and w.minimumHeight() < CELL_H and w is not self.chev:
+                    w.setFixedHeight(CELL_H)
         outer.addWidget(self.top)
 
         self._notes_timer = QTimer(self)
@@ -430,6 +482,13 @@ class ItemRow(QFrame):
         self.notes_icon.setPixmap(make_icon("notes", muted, 12).pixmap(12, 12))
         self.bell_icon.setPixmap(make_icon("bell", accent, 12).pixmap(12, 12))
         self.notes_icon.setVisible(bool(it.notes.strip()))
+        show_link = bool(it.link) and bool(self.app.settings.get("show_links", True))
+        self.link_btn.setVisible(show_link)
+        if show_link:
+            set_icon_name(self.link_btn, links.icon_name(it.link) or "globe")
+            k = links.kind(it.link)
+            self.link_btn.setToolTip({"web": "Open ", "folder": "Open folder ", "file": "Open "}.get(k, "Not found: ")
+                                     + it.link)
         self.bell_icon.setVisible(it.reminder and not self.checklist)
         self.bell_icon.setToolTip(f"Reminder at {dates.fmt_time(self.remind_time())}")
         self.pri.setText(" " + PRIORITIES[it.priority])
@@ -481,7 +540,24 @@ class ItemRow(QFrame):
         self.notes_edit.setFixedHeight(76)
         self.notes_edit.textChanged.connect(self._notes_timer.start)
         v.addWidget(self.notes_edit)
-        if self.checklist:
+        link_row = QHBoxLayout()
+        link_row.setSpacing(8)
+        lab = QLabel("Link")
+        lab.setObjectName("FieldLabel")
+        link_row.addWidget(lab)
+        self.link_edit = QLineEdit(it.link)
+        self.link_edit.setPlaceholderText("A web address, folder or file")
+        self.link_edit.setToolTip("Paste a web address, or a folder or file path. The icon by the item opens it.")
+        self.link_edit.editingFinished.connect(self._save_link)
+        link_row.addWidget(self.link_edit, 1)
+        browse = QPushButton("Browse…")
+        bmenu = QMenu(browse)
+        bmenu.addAction("A folder…", lambda: self._browse_link(folder=True))
+        bmenu.addAction("A file…", lambda: self._browse_link(folder=False))
+        browse.setMenu(bmenu)
+        link_row.addWidget(browse)
+        v.addLayout(link_row)
+        if self.checklist and self.page.categories_on:
             cat_row = QHBoxLayout()
             cat_row.setSpacing(8)
             lab = QLabel("Category")
@@ -501,6 +577,7 @@ class ItemRow(QFrame):
             cat_row.addWidget(self.cat_box)
             cat_row.addStretch(1)
             v.addLayout(cat_row)
+        if self.checklist:
             row = QHBoxLayout()
             row.setSpacing(8)
             if self.page.timer_on:
@@ -601,6 +678,43 @@ class ItemRow(QFrame):
         elif value != self.item.category:
             QTimer.singleShot(0, lambda: self.app.store.update_item(item_id, category=value or ""))
 
+    def _category_menu(self) -> None:
+        """Click the Category cell: pick from a dropdown right there."""
+        menu = QMenu(self)
+        item_id, current = self.item.id, self.item.category
+        none = menu.addAction("None", lambda: self.app.store.update_item(item_id, category=""))
+        none.setCheckable(True)
+        none.setChecked(not current)
+        menu.addSeparator()
+        for name in self.page.categories():
+            act = menu.addAction(name, lambda n=name: self.app.store.update_item(item_id, category=n))
+            act.setCheckable(True)
+            act.setChecked(name == current)
+        menu.addSeparator()
+        menu.addAction("New category…", lambda: QTimer.singleShot(0, lambda: self.page.new_category(item_id)))
+        menu.addAction("Edit categories…", lambda: QTimer.singleShot(0, self.page.edit_categories))
+        menu.exec(self.cat_lbl.mapToGlobal(QPoint(0, self.cat_lbl.height())))
+
+    def _save_link(self) -> None:
+        if self.panel is None or not hasattr(self, "link_edit"):
+            return
+        value = links.normalize(self.link_edit.text())
+        if value != self.item.link:
+            self._quiet_update(link=value)
+
+    def _browse_link(self, folder: bool) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        start = self.item.link if self.item.link and not links.is_web(self.item.link) else ""
+        if folder:
+            path = QFileDialog.getExistingDirectory(self, "Link a folder", start)
+        else:
+            path, _ = QFileDialog.getOpenFileName(self, "Link a file", start)
+        if path:
+            from pathlib import Path
+            path = str(Path(path))
+            self.link_edit.setText(path)
+            self._quiet_update(link=path)
+
     def _save_limit(self) -> None:
         if self.panel is None or not hasattr(self, "limit_edit"):
             return
@@ -664,6 +778,7 @@ class ItemRow(QFrame):
             self._notes_timer.stop()
         self._save_notes()
         self._save_name()
+        self._save_link()
 
 
 # ---------------------------------------------------------------------------
@@ -680,6 +795,32 @@ class RowsContainer(QWidget):
         self.line.setObjectName("DropLine")
         self.line.setFixedHeight(3)
         self.line.hide()
+        self._scroll_step = 0
+        self._scroller = QTimer(self)
+        self._scroller.setInterval(30)
+        self._scroller.timeout.connect(self._autoscroll)
+
+    def _edge_speed(self, y_in_container: int) -> int:
+        """How fast to scroll while dragging near the visible top or bottom: faster nearer the edge."""
+        view = self.page.scroll.viewport()
+        y = self.mapTo(view, QPoint(0, y_in_container)).y()
+        if y < EDGE_PX:
+            return -max(2, int(MAX_SCROLL * (EDGE_PX - y) / EDGE_PX))
+        if y > view.height() - EDGE_PX:
+            return max(2, int(MAX_SCROLL * (y - (view.height() - EDGE_PX)) / EDGE_PX))
+        return 0
+
+    def _autoscroll(self) -> None:
+        bar = self.page.scroll.verticalScrollBar()
+        if not self._scroll_step or (self._scroll_step < 0 and bar.value() <= bar.minimum()) or \
+                (self._scroll_step > 0 and bar.value() >= bar.maximum()):
+            self._scroller.stop()
+            return
+        bar.setValue(bar.value() + self._scroll_step)
+
+    def _stop_scroll(self) -> None:
+        self._scroll_step = 0
+        self._scroller.stop()
 
     def _target(self, y: int) -> "ItemRow | None":
         for row in self.page.rows:
@@ -694,6 +835,9 @@ class RowsContainer(QWidget):
     def dragMoveEvent(self, e) -> None:
         if not e.mimeData().hasFormat(ROW_MIME):
             return
+        self._scroll_step = self._edge_speed(e.position().toPoint().y())
+        if self._scroll_step and not self._scroller.isActive():
+            self._scroller.start()
         rows = self.page.rows
         row = self._target(e.position().toPoint().y())
         if row is not None:
@@ -707,9 +851,11 @@ class RowsContainer(QWidget):
 
     def dragLeaveEvent(self, e) -> None:
         self.line.hide()
+        self._stop_scroll()
 
     def dropEvent(self, e) -> None:
         self.line.hide()
+        self._stop_scroll()
         if not e.mimeData().hasFormat(ROW_MIME):
             return
         try:
@@ -774,11 +920,17 @@ class ListPage(QWidget):
         bar.addWidget(add)
         v.addLayout(bar)
 
+        self.preview_row = QWidget()
+        pr = QHBoxLayout(self.preview_row)
+        pr.setContentsMargins(14, 2, 12, 0)
+        pr.setSpacing(6)
+        self.preview_link = QLabel()
         self.preview = QLabel()
         self.preview.setObjectName("Hint")
-        self.preview.setContentsMargins(14, 2, 12, 0)
-        self.preview.hide()
-        v.addWidget(self.preview)
+        pr.addWidget(self.preview_link)
+        pr.addWidget(self.preview, 1)
+        self.preview_row.hide()
+        v.addWidget(self.preview_row)
         v.addSpacing(6)
 
         # header
@@ -831,7 +983,7 @@ class ListPage(QWidget):
         self.empty.setText("No steps yet. Add the first one above." if checklist
                            else "Nothing here yet. Add an item above.")
         if checklist:
-            self.preview.hide()
+            self.preview_row.hide()
 
     def sync_kind(self) -> None:
         """Called when the list is switched between a priority list and a checklist."""
@@ -858,21 +1010,27 @@ class ListPage(QWidget):
         drag.setHotSpot(QPoint(24, pm.height() // 2))
         drag.exec(Qt.DropAction.MoveAction)
         self.container.line.hide()
+        self.container._stop_scroll()
 
     @property
     def timer_on(self) -> bool:
         tab = self.app.store.tab(self.tab_id)
-        return bool(tab and tab.is_checklist and tab.timer_on)
+        return bool(tab and tab.is_checklist and tab.timer_on and self.app.has("timer"))
 
-    def time_text(self, item: Item) -> tuple[str, str, str]:
-        """(text, status, tooltip) for a step's Time cell."""
+    @property
+    def categories_on(self) -> bool:
+        return self.app.has("categories")
+
+    def time_text(self, item: Item, pill: bool = False) -> tuple[str, str, str]:
+        """(text, status, tooltip) for a step's Time cell. On a pill, a step that hasn't started
+        and has no limit shows nothing (in the list it shows a dash you can click)."""
         timer = self.app.timer
         spent = timer.live_elapsed(item)
         limit = item.time_limit
         limit_tip = f"Limit {fmt_duration(limit)}. " if limit else ""
         if not item.started and not item.done:
-            return (fmt_duration(limit) if limit else "—", "none",
-                    limit_tip + "Not started. Click the step to set a time limit.")
+            return (fmt_duration(limit) if limit else ("" if pill else "—"), "none",
+                    limit_tip + "Not started. Click to set a time limit for this step.")
         if item.done:
             over = limit and spent > limit
             return fmt_duration(spent), ("over" if over else "done"), limit_tip + f"Took {fmt_duration(spent)}"
@@ -928,13 +1086,31 @@ class ListPage(QWidget):
             return
         self.app.timer.set_tab_limit(self.tab_id, seconds)
 
+    def set_step_limit(self, item_id: int) -> None:
+        """Click a step's time (in the list or on the pill): give that step a time limit."""
+        item = self.app.store.item(item_id)
+        if item is None:
+            return
+        text, ok = QInputDialog.getText(self, "Time limit for this step",
+                                        f"How long should “{item.name}” take?\n"
+                                        "e.g. 15m, 1h30, 1:30 or 90s. Leave empty for no limit.",
+                                        text=fmt_limit(item.time_limit))
+        if not ok:
+            return
+        seconds = parse_duration(text)
+        if seconds is None:
+            self.app.flash("Try a time like 15m, 1h30, 1:30 or 90s")
+            return
+        self.app.timer.set_item_limit(item_id, seconds)
+        self.app.refresh_times()
+
     def edit_description(self) -> None:
         DescriptionPopup(self, self.app, self.tab_id).show_under(self.desc_btn)
 
     @property
     def show_category(self) -> bool:
         tab = self.app.store.tab(self.tab_id)
-        return bool(tab and tab.is_checklist and tab.show_category)
+        return bool(tab and tab.is_checklist and tab.show_category and self.categories_on)
 
     def categories(self) -> list[str]:
         tab = self.app.store.tab(self.tab_id)
@@ -954,7 +1130,9 @@ class ListPage(QWidget):
             self.app.store.update_item(item_id, category=name)
 
     def edit_categories(self) -> None:
-        dialog = CategoriesDialog(self, self.categories())
+        others = [(t.name, t.category_list) for t in self.app.store.tabs()
+                  if t.id != self.tab_id and t.is_checklist and t.category_list]
+        dialog = CategoriesDialog(self, self.categories(), others)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             names, renamed = dialog.result_names()
             self.app.store.set_categories(self.tab_id, names, renamed)
@@ -987,19 +1165,21 @@ class ListPage(QWidget):
     def _header_menu(self, pos) -> None:
         menu = QMenu(self)
         if self.is_checklist:
-            shown = self.show_category
-            menu.addAction("Hide the Category column" if shown else "Show the Category column",
-                           lambda: self.app.store.update_tab(self.tab_id, show_category=not shown))
-            menu.addAction("Edit categories…", self.edit_categories)
-            menu.addSeparator()
-            menu.addAction("Turn the timer off" if self.timer_on else "Use a timer",
-                           lambda: self.app.set_timer_on(self.tab_id, not self.timer_on))
-            menu.addAction("Show as a priority list", lambda: self.app.store.set_tab_kind(self.tab_id, "list"))
+            if self.categories_on:
+                shown = self.show_category
+                menu.addAction("Hide the Category column" if shown else "Show the Category column",
+                               lambda: self.app.store.update_tab(self.tab_id, show_category=not shown))
+                menu.addAction("Edit categories…", self.edit_categories)
+                menu.addSeparator()
+            if self.app.has("timer"):
+                menu.addAction("Turn the timer off" if self.timer_on else "Use a timer",
+                               lambda: self.app.set_timer_on(self.tab_id, not self.timer_on))
+            menu.addAction("Switch to priority list", lambda: self.app.store.set_tab_kind(self.tab_id, "list"))
         else:
             hidden = bool(self.app.settings.get("hide_pri"))
             menu.addAction("Show the Priority column" if hidden else "Hide the Priority column",
                            lambda: self.app.set_setting("hide_pri", not hidden))
-            menu.addAction("Show as a checklist", lambda: self.app.store.set_tab_kind(self.tab_id, "checklist"))
+            menu.addAction("Switch to checklist", lambda: self.app.store.set_tab_kind(self.tab_id, "checklist"))
         menu.exec(self.header.mapToGlobal(pos))
 
     def progress(self) -> tuple[int, int]:
@@ -1039,7 +1219,7 @@ class ListPage(QWidget):
                 cat.setObjectName("HeaderLabel")
                 cat.setFixedWidth(CAT_W)
                 lay.addWidget(cat)
-            if tab is not None and tab.timer_on and tab.timer_finished:
+            if tab is not None and self.timer_on and tab.timer_finished and self.app.has("ledger"):
                 ledger = icon_button("ledger", "Make a PDF of this time log in Ledger", role="accent", size=PLAY_W)
                 ledger.clicked.connect(lambda: self.app.make_pdf(self.tab_id))
                 lay.addWidget(ledger)
@@ -1155,8 +1335,12 @@ class ListPage(QWidget):
     # ---- quick add ------------------------------------------------------------------
     def _update_preview(self) -> None:
         text = self.input.text().strip()
-        if not text or self.is_checklist:
-            self.preview.hide()
+        if not text:
+            self.preview_row.hide()
+            return
+        if self.is_checklist:
+            name, link = take_link(text)
+            self._show_preview(f"Adds “{name or link}”", link) if link else self.preview_row.hide()
             return
         q = parse_quick_add(text, dt.date.today())
         parts = []
@@ -1167,11 +1351,20 @@ class ListPage(QWidget):
             parts.append(f"{q.priority} priority")
         if q.remind_time:
             parts.append(f"reminder {dates.fmt_time(q.remind_time)}")
-        if parts:
-            self.preview.setText(f"Adds “{q.name}”  ·  " + "  ·  ".join(parts))
-            self.preview.show()
+        if parts or q.link:
+            self._show_preview(f"Adds “{q.name or q.link}”" + ("  ·  " + "  ·  ".join(parts) if parts else ""), q.link)
         else:
-            self.preview.hide()
+            self.preview_row.hide()
+
+    def _show_preview(self, text: str, link: str) -> None:
+        """The line under the add box; a web address shows as a small link icon, not the address."""
+        self.preview.setText(text)
+        if link:
+            self.preview_link.setPixmap(make_icon(links.icon_name(link) or "globe", themes.current["accent"], 13)
+                                        .pixmap(13, 13))
+            self.preview_link.setToolTip(link)
+        self.preview_link.setVisible(bool(link))
+        self.preview_row.show()
 
     def _open_date_popup(self) -> None:
         self.popup = DatePopup(self, self.draft_due, self.draft_end)
@@ -1201,7 +1394,8 @@ class ListPage(QWidget):
             self.input.setFocus()
             return
         if self.is_checklist:
-            self.app.store.add_item(self.tab_id, text)
+            name, link = take_link(text)
+            self.app.store.add_item(self.tab_id, name or link, link=link)
             self.input.clear()
             self.input.setFocus()
             return
@@ -1211,8 +1405,8 @@ class ListPage(QWidget):
         else:
             due, end = self.draft_due, self.draft_end
         priority = PRIORITIES.index(q.priority) if q.priority else self.pri_box.currentIndex()
-        self.app.store.add_item(self.tab_id, q.name or text, due=due, end=end, priority=priority,
-                                reminder=bool(q.remind_time), remind_time=q.remind_time or "")
+        self.app.store.add_item(self.tab_id, q.name or q.link or text, due=due, end=end, priority=priority,
+                                reminder=bool(q.remind_time), remind_time=q.remind_time or "", link=q.link)
         self.input.clear()
         self.draft_due = self.draft_end = ""
         self.pri_box.setCurrentIndex(1)

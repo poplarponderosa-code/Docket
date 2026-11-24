@@ -33,6 +33,11 @@ PATHS = {
     "notes": '<path d="M3.5 4.5h9M3.5 8h9M3.5 11.5h5"/>',
     "trash": '<path d="M3.5 4.5h9M6.5 4.5V3h3v1.5M5 4.5l.5 8.5h5l.5-8.5"/>',
     "calendar": '<path d="M3 4h10v9H3zM3 7h10M6 2.5v3M10 2.5v3"/>',
+    "globe": '<circle cx="8" cy="8" r="5.5"/><path d="M2.5 8h11M8 2.5c-2 2.2-2 8.8 0 11M8 2.5c2 2.2 2 8.8 0 11"/>',
+    "folder": '<path d="M2.5 4.5h4l1.2 1.5h5.8v6.5h-11z"/>',
+    "file": '<path d="M4.5 2.5h4.5l2.5 2.5v8.5h-7z"/><path d="M9 2.5V5h2.5"/>',
+    "mic": '<rect x="6" y="2.5" width="4" height="7" rx="2"/><path d="M4 8a4 4 0 0 0 8 0M8 12v1.8"/>',
+    "reset": '<path d="M3.5 8a4.5 4.5 0 1 0 1.4-3.3"/><path d="M3.5 2.8v2.4h2.4"/>',
 }
 
 

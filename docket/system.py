@@ -121,3 +121,102 @@ def play_alert() -> None:
         QApplication.beep()
     except Exception:
         pass
+
+
+def rect_is_fullscreen(window: tuple[int, int, int, int], monitor: tuple[int, int, int, int]) -> bool:
+    """A window covering its whole monitor (taskbar included) is full screen; a maximized one isn't."""
+    left, top, right, bottom = window
+    m_left, m_top, m_right, m_bottom = monitor
+    return left <= m_left and top <= m_top and right >= m_right and bottom >= m_bottom
+
+
+def foreground_is_fullscreen(own_hwnds: tuple[int, ...] = ()) -> bool:
+    """True when the app in front fills the whole screen (a game, a slideshow, a full-screen video)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd or hwnd in own_hwnds or hwnd in (user32.GetDesktopWindow(), user32.GetShellWindow()):
+            return False
+        cls = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(hwnd, cls, 64)
+        if cls.value in ("Progman", "WorkerW", "Shell_TrayWnd"):
+            return False
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return False
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                        ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        monitor = user32.MonitorFromWindow(hwnd, 2)          # MONITOR_DEFAULTTONEAREST
+        if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return False
+        m = info.rcMonitor
+        return rect_is_fullscreen((rect.left, rect.top, rect.right, rect.bottom), (m.left, m.top, m.right, m.bottom))
+    except Exception:
+        return False
+
+
+def start_voice_typing() -> bool:
+    """Press Win+H, which opens Windows voice typing in whatever box has the cursor."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        VK_LWIN, VK_H, KEYUP = 0x5B, 0x48, 0x0002
+        user32.keybd_event(VK_LWIN, 0, 0, 0)
+        user32.keybd_event(VK_H, 0, 0, 0)
+        user32.keybd_event(VK_H, 0, KEYUP, 0)
+        user32.keybd_event(VK_LWIN, 0, KEYUP, 0)
+        return True
+    except Exception:
+        return False
+
+
+_taskbar = None
+
+
+def hide_taskbar_button(hwnd: int) -> bool:
+    """Take a window's button off the taskbar while it stays in Alt+Tab (ITaskbarList::DeleteTab)."""
+    global _taskbar
+    if sys.platform != "win32" or not hwnd:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class GUID(ctypes.Structure):
+            _fields_ = [("d1", ctypes.c_ulong), ("d2", ctypes.c_ushort), ("d3", ctypes.c_ushort),
+                        ("d4", ctypes.c_ubyte * 8)]
+
+        def guid(a, b, c, d):
+            g = GUID(a, b, c)
+            g.d4[:] = d
+            return g
+
+        if _taskbar is None:
+            ole32 = ctypes.windll.ole32
+            ole32.CoInitialize(None)
+            clsid = guid(0x56FDF344, 0xFD6D, 0x11D0, (0x95, 0x8A, 0x00, 0x60, 0x97, 0xC9, 0xA0, 0x90))
+            iid = guid(0x56FDF342, 0xFD6D, 0x11D0, (0x95, 0x8A, 0x00, 0x60, 0x97, 0xC9, 0xA0, 0x90))
+            ptr = ctypes.c_void_p()
+            if ole32.CoCreateInstance(ctypes.byref(clsid), None, 1, ctypes.byref(iid), ctypes.byref(ptr)) != 0:
+                return False
+            vtbl = ctypes.cast(ptr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+            hr_init = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)(vtbl[3])
+            if hr_init(ptr) != 0:
+                return False
+            _taskbar = (ptr, vtbl)
+        ptr, vtbl = _taskbar
+        delete_tab = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, wintypes.HWND)(vtbl[5])
+        return delete_tab(ptr, hwnd) == 0
+    except Exception:
+        return False

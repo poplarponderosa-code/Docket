@@ -30,3 +30,22 @@ def snap(x: int, y: int, w: int, h: int, others: list[Rect], area: Rect, px: int
     for target in (at, at + ah - h):
         best_y = consider(y, target, best_y)
     return x + (best_x or 0), y + (best_y or 0)
+
+
+def _touch(a: tuple[int, int, int, int], b: tuple[int, int, int, int], tol: int) -> bool:
+    """Two rectangles (x, y, w, h) touch or overlap, allowing a small gap."""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    return (ax - tol <= bx + bw and bx - tol <= ax + aw and ay - tol <= by + bh and by - tol <= ay + ah)
+
+
+def touching_group(start: int, rects: list[tuple[int, int, int, int]], tol: int = 2) -> list[int]:
+    """Indexes of every rectangle connected to rects[start] through touching edges (start included)."""
+    seen, todo = {start}, [start]
+    while todo:
+        i = todo.pop()
+        for j, r in enumerate(rects):
+            if j not in seen and _touch(rects[i], r, tol):
+                seen.add(j)
+                todo.append(j)
+    return sorted(seen)

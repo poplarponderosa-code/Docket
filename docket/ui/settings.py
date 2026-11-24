@@ -1,7 +1,6 @@
-"""Settings: themes, startup, reminders, columns, sorting, backups, templates and import/export.
+"""Settings, in tabs across the top: General, Appearance, Lists, Timer, Shortcuts, Backup, About.
 
-Everything is laid out to fit the window's width (rows wrap or stack), so nothing
-hides off to the side.
+Each mode only shows what it uses, and everything is laid out to fit the window's width.
 """
 from __future__ import annotations
 
@@ -15,9 +14,9 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComb
                                QFrame, QGridLayout, QHBoxLayout, QKeySequenceEdit, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem,
                                QPushButton, QScrollArea,
-                               QSizePolicy, QSpinBox, QTimeEdit, QToolButton, QVBoxLayout, QWidget)
+                               QSizePolicy, QSpinBox, QTabWidget, QTimeEdit, QToolButton, QVBoxLayout, QWidget)
 
-from .. import __version__, themes, updates
+from .. import __version__, modes, themes, updates
 from .icons import make_icon, swatch_icon
 
 if TYPE_CHECKING:
@@ -29,29 +28,60 @@ FREQ_CHOICES = [("change", "After every change"), ("hourly", "Hourly"), ("daily"
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, app: "DocketApp", parent: QWidget):
+    """Settings in tabs across the top. Each mode only shows the tabs and options it uses."""
+
+    def __init__(self, app: "DocketApp", parent: QWidget, tab: str = ""):
         super().__init__(parent)
         self.app = app
         self.setObjectName("Settings")
         self.setWindowTitle("Docket settings")
-        self.resize(480, 680)
-        self.setMinimumWidth(420)
+        self.resize(540, 660)
+        self.setMinimumWidth(460)
         s = app.settings
+        mode = app.mode()
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("SettingsTabs")
+        self.tabs.setDocumentMode(True)
+        self.tab_keys: list[str] = []
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        body = QWidget()
-        body.setObjectName("SettingsBody")
-        v = QVBoxLayout(body)
-        v.setContentsMargins(18, 14, 18, 18)
-        v.setSpacing(8)
-        scroll.setWidget(body)
-        outer.addWidget(scroll)
+        outer.setContentsMargins(0, 6, 0, 0)
+        outer.addWidget(self.tabs, 1)
 
-        # ---- theme
+        # ---- General
+        v = self._page("general", "General")
+        v.addWidget(self._section("MODE"))
+        mrow = QHBoxLayout()
+        self.mode_box = QComboBox()
+        for key in modes.MODES:
+            self.mode_box.addItem(f"{modes.LABELS[key]}: {modes.SUMMARIES[key][0]}", key)
+        self.mode_box.setCurrentIndex(modes.MODES.index(mode))
+        self.mode_box.activated.connect(lambda i: app.change_mode(self.mode_box.itemData(i)))
+        mrow.addWidget(self.mode_box, 1)
+        v.addLayout(mrow)
+        v.addWidget(self._hint(" · ".join(modes.SUMMARIES[mode][1])))
+        v.addWidget(self._hint("All modes are free. Switching only hides or shows features; nothing is lost."))
+        v.addLayout(self._buttons([("Run first-time setup again…", app.show_setup)]))
+        v.addWidget(self._section("WINDOWS"))
+        v.addWidget(self._check("Launch when Windows starts", "startup"))
+        v.addWidget(self._check("Start hidden in the tray", "start_hidden"))
+        v.addWidget(self._check("Keep windows on top", "on_top"))
+        v.addWidget(self._check("Show Docket in Alt+Tab and Task View (it still has no taskbar icon)", "alt_tab"))
+        v.addWidget(self._section("REMINDERS"))
+        rem = QHBoxLayout()
+        rem.addWidget(self._check("Reminders, by default at", "reminders"))
+        self.time_edit = QTimeEdit(QTime.fromString(s["remind_time"], "HH:mm"))
+        self.time_edit.setDisplayFormat("h:mm AP")
+        self.time_edit.timeChanged.connect(lambda t: app.set_setting("remind_time", t.toString("HH:mm")))
+        rem.addWidget(self.time_edit)
+        rem.addStretch(1)
+        v.addLayout(rem)
+        v.addWidget(self._hint("Each item can have its own time (open the item). Reminders arrive on the "
+                               "item's start date, or right away if it's already late. Checklists have none."))
+        v.addStretch(1)
+
+        # ---- Appearance
+        v = self._page("appearance", "Appearance")
         v.addWidget(self._section("THEME"))
         grid = QGridLayout()
         grid.setSpacing(4)
@@ -72,29 +102,14 @@ class SettingsDialog(QDialog):
             grid.addWidget(b, 0, i)
         grid.setColumnStretch(len(themes.PALETTES), 1)
         v.addLayout(grid)
-        v.addWidget(self._check("Fill whole tabs with their list's colour", "tab_tint"))
-        v.addWidget(self._hint("Each list has its own colour (right-click its tab > Colour). Off: a coloured "
-                               "dot. On: the whole tab, the list's own window title and its pill are tinted."))
-
-        # ---- general
-        v.addWidget(self._section("GENERAL"))
-        v.addWidget(self._check("Launch when Windows starts", "startup"))
-        v.addWidget(self._check("Start hidden in the tray", "start_hidden"))
-        v.addWidget(self._check("Keep windows on top", "on_top"))
-        v.addWidget(self._check("Keep pills on top", "pill_on_top"))
-        rem = QHBoxLayout()
-        rem.addWidget(self._check("Reminders, by default at", "reminders"))
-        self.time_edit = QTimeEdit(QTime.fromString(s["remind_time"], "HH:mm"))
-        self.time_edit.setDisplayFormat("h:mm AP")
-        self.time_edit.timeChanged.connect(lambda t: app.set_setting("remind_time", t.toString("HH:mm")))
-        rem.addWidget(self.time_edit)
-        rem.addStretch(1)
-        v.addLayout(rem)
-        v.addWidget(self._hint("Each item can have its own time (open the item). Reminders arrive on the "
-                               "item's start date, or right away if it's already late. Checklists have none."))
-
-        # ---- pills
+        if modes.has(mode, "tab_tint"):
+            v.addWidget(self._check("Fill whole tabs with their list's colour", "tab_tint"))
+            v.addWidget(self._hint("Each list has its own colour (right-click its tab > Colour). Off: a coloured "
+                                   "dot. On: the whole tab, the list's own window title and its pill are tinted."))
+        else:
+            v.addWidget(self._hint("Each list has its own colour: right-click its tab > Colour."))
         v.addWidget(self._section("PILLS"))
+        v.addWidget(self._check("Keep pills on top", "pill_on_top"))
         prow = QHBoxLayout()
         prow.addWidget(QLabel("New pills show"))
         self.lines_box = QComboBox()
@@ -106,11 +121,41 @@ class SettingsDialog(QDialog):
         prow.addWidget(self.lines_box)
         prow.addStretch(1)
         v.addLayout(prow)
+        v.addWidget(self._check("Wrap long items in pills (the pill grows taller to fit)", "pill_wrap"))
         v.addWidget(self._check("Snap pills to each other, the main window and screen edges", "snap_pills"))
         v.addWidget(self._hint("Drag a pill's bottom edge to show 1, 2 or 3 items. Double-click its side edge to "
-                               "fit the whole item's width."))
+                               "fit the whole item's width. Hold Ctrl while dragging a pill to move every pill "
+                               "snapped to it."))
+        v.addStretch(1)
 
-        # ---- columns & sorting
+        # ---- Lists
+        v = self._page("lists", "Lists")
+        v.addWidget(self._section("NEW LISTS"))
+        krow = QHBoxLayout()
+        krow.addWidget(QLabel("+ New list makes a"))
+        self.kind_box = QComboBox()
+        self.kind_box.addItem("Checklist", "checklist")
+        self.kind_box.addItem("Priority list", "list")
+        self.kind_box.setCurrentIndex(0 if s.get("new_list_kind", "checklist") == "checklist" else 1)
+        self.kind_box.currentIndexChanged.connect(
+            lambda i: app.set_setting("new_list_kind", self.kind_box.itemData(i)))
+        krow.addWidget(self.kind_box)
+        krow.addStretch(1)
+        v.addLayout(krow)
+        v.addWidget(self._hint("Switch any list with one click: right-click its tab > Switch to…"))
+        v.addWidget(self._section("ITEMS"))
+        wrow = QHBoxLayout()
+        wrow.addWidget(QLabel("Long item names"))
+        self.wrap_box = QComboBox()
+        self.wrap_box.addItem("Wrap to fit", True)
+        self.wrap_box.addItem("Single line with …", False)
+        self.wrap_box.setCurrentIndex(0 if s.get("wrap_items", True) else 1)
+        self.wrap_box.currentIndexChanged.connect(lambda i: app.set_setting("wrap_items", self.wrap_box.itemData(i)))
+        wrow.addWidget(self.wrap_box)
+        wrow.addStretch(1)
+        v.addLayout(wrow)
+        v.addWidget(self._check("Show link icons next to items", "show_links"))
+        v.addWidget(self._check("Show completed items", "show_done"))
         v.addWidget(self._section("COLUMNS & SORTING (PRIORITY LISTS)"))
         v.addWidget(self._hint("Drag a column by its handle to change the order, left to right. "
                                "Untick Priority to hide that column."))
@@ -137,29 +182,144 @@ class SettingsDialog(QDialog):
         sort_row.addWidget(self.sort_box)
         sort_row.addStretch(1)
         v.addLayout(sort_row)
-        v.addWidget(self._check("Show completed items", "show_done"))
+        v.addStretch(1)
 
-        # ---- checklist timer
-        v.addWidget(self._section("CHECKLIST TIMER"))
-        v.addWidget(self._hint("Turn a checklist's timer on with right-click its tab > Use a timer. Time runs on "
-                               "the top unticked step; ticking it starts the next one. Click a step to give it a "
-                               "time limit, and the total in the header for a limit on the whole checklist."))
-        v.addWidget(self._check("Play a sound when time's up", "timer_sound"))
-        v.addWidget(self._field_label("Time logs folder (saved when you tick the last step)"))
+        # ---- Timer (Pro)
         self.log_folder = QLineEdit(str(app.timelog_dir()))
-        self.log_folder.setReadOnly(True)
-        v.addWidget(self.log_folder)
-        v.addLayout(self._buttons([("Change folder…", self._change_logs), ("Open folder", self._open_logs)]))
-        v.addWidget(self._check("Also save a CSV copy (opens in Excel or Google Sheets)", "timelog_csv"))
-        from .. import companions
-        ledger = companions.get("ledger")
-        has_ledger = ledger is not None and companions.find(ledger) is not None
-        v.addLayout(self._buttons([("Open Ledger" if has_ledger else "Get Ledger…",
-                                    lambda: app.open_companion("ledger"))]))
-        v.addWidget(self._hint("Docket Ledger, the companion app, turns time logs into tidy PDF timesheets. "
-                               "It finds this folder by itself."))
+        if modes.has(mode, "timer"):
+            v = self._page("timer", "Timer")
+            v.addWidget(self._section("CHECKLIST TIMER"))
+            v.addWidget(self._hint("Turn a checklist's timer on with right-click its tab > Use a timer. Time runs "
+                                   "on the top unticked step; ticking it starts the next one. Click a step's time "
+                                   "to give it a limit, and the total in the header for the whole checklist."))
+            v.addWidget(self._check("Play a sound when time's up", "timer_sound"))
+            v.addWidget(self._section("TIME LOGS"))
+            v.addWidget(self._field_label("Time logs folder (saved when you tick the last step)"))
+            self.log_folder.setReadOnly(True)
+            v.addWidget(self.log_folder)
+            v.addLayout(self._buttons([("Change folder…", self._change_logs), ("Open folder", self._open_logs)]))
+            v.addWidget(self._check("Also save a CSV copy (opens in Excel or Google Sheets)", "timelog_csv"))
+            crow = QHBoxLayout()
+            crow.addWidget(QLabel("Clear logs older than"))
+            self.clear_n = QSpinBox()
+            self.clear_n.setRange(1, 999)
+            self.clear_n.setValue(int(s.get("clear_logs_n", 3)))
+            crow.addWidget(self.clear_n)
+            self.clear_unit = QComboBox()
+            for unit in ("days", "weeks", "months"):
+                self.clear_unit.addItem(unit, unit)
+            self.clear_unit.setCurrentIndex(max(0, self.clear_unit.findData(s.get("clear_logs_unit", "months"))))
+            crow.addWidget(self.clear_unit)
+            older = QPushButton("Clear…")
+            older.clicked.connect(self._clear_older)
+            crow.addWidget(older)
+            crow.addStretch(1)
+            v.addLayout(crow)
+            v.addLayout(self._buttons([("Clear all time logs…", lambda: app.clear_time_logs(None, self))]))
+            v.addWidget(self._hint("Only Docket's own time logs are deleted. Nothing is cleared automatically."))
+            v.addWidget(self._section("COPY LIST"))
+            v.addWidget(self._check("Include the client label when copying a list", "copy_client"))
+            v.addWidget(self._hint("Off: Copy list leaves the client label out, so pasting a list into an AI chat "
+                                   "doesn't send it. Backups and exports always keep it."))
+            v.addWidget(self._section("LEDGER"))
+            from .. import companions
+            ledger = companions.get("ledger")
+            has_ledger = ledger is not None and companions.find(ledger) is not None
+            v.addLayout(self._buttons([("Open Ledger" if has_ledger else "Get Ledger…",
+                                        lambda: app.open_companion("ledger"))]))
+            v.addWidget(self._hint("Docket Ledger, the companion app, turns time logs into tidy PDF timesheets "
+                                   "and invoices. It finds the time logs folder by itself."))
+            v.addStretch(1)
 
-        # ---- backup
+        # ---- Shortcuts & quick capture (Advanced)
+        self.key_edits: dict[str, QKeySequenceEdit] = {}
+        self.key_status: dict[str, QLabel] = {}
+        if modes.has(mode, "shortcuts"):
+            v = self._page("shortcuts", "Shortcuts")
+            v.addWidget(self._section("KEYBOARD SHORTCUTS"))
+            v.addWidget(self._hint("These work from any program. Click a box and press the keys you want; "
+                                   "Backspace clears it."))
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(8)
+            grid.setVerticalSpacing(4)
+            for row, (key, label) in enumerate((("hotkey_capture", "Quick capture"),
+                                                ("hotkey_show", "Show or hide Docket"),
+                                                ("hotkey_tick", "Tick the top item"),
+                                                ("hotkey_timer", "Start or pause the timer"))):
+                grid.addWidget(QLabel(label), row * 2, 0)
+                edit = QKeySequenceEdit(QKeySequence(s.get(key, ""), QKeySequence.SequenceFormat.PortableText))
+                if hasattr(edit, "setMaximumSequenceLength"):
+                    edit.setMaximumSequenceLength(1)
+                if hasattr(edit, "setClearButtonEnabled"):
+                    edit.setClearButtonEnabled(True)
+                edit.editingFinished.connect(lambda k=key, e=edit: self._save_key(k, e))
+                edit.keySequenceChanged.connect(lambda seq, k=key, e=edit: seq.isEmpty() and self._save_key(k, e))
+                grid.addWidget(edit, row * 2, 1)
+                status = QLabel()
+                status.setObjectName("Hint")
+                status.setWordWrap(True)
+                grid.addWidget(status, row * 2 + 1, 1)
+                self.key_edits[key] = edit
+                self.key_status[key] = status
+            grid.setColumnStretch(1, 1)
+            v.addLayout(grid)
+            v.addLayout(self._buttons([("Reset to F16, F13, F14, F15", self._reset_keys)]))
+            v.addWidget(self._section("QUICK CAPTURE"))
+            trow = QHBoxLayout()
+            trow.addWidget(QLabel("New items go to"))
+            self.target_box = QComboBox()
+            self.target_box.addItem("Inbox", "inbox")
+            self.target_box.addItem("The last list I used", "last")
+            self.target_box.addItem("A list I choose", "list")
+            self.target_box.setCurrentIndex(max(0, self.target_box.findData(s.get("capture_target", "inbox"))))
+            self.target_box.currentIndexChanged.connect(self._target_changed)
+            trow.addWidget(self.target_box)
+            self.target_list = QComboBox()
+            self.target_list.setMinimumContentsLength(10)
+            self._fill_target_lists()
+            self.target_list.activated.connect(
+                lambda i: app.set_setting("capture_list", self.target_list.itemData(i)))
+            trow.addWidget(self.target_list)
+            trow.addStretch(1)
+            v.addLayout(trow)
+            self.target_list.setVisible(s.get("capture_target") == "list")
+            frow = QHBoxLayout()
+            frow.addWidget(QLabel("While a full-screen app is open"))
+            self.fs_box = QComboBox()
+            self.fs_box.addItem("Ignore the shortcut", "ignore")
+            self.fs_box.addItem("Open anyway", "open")
+            self.fs_box.setCurrentIndex(0 if s.get("capture_fullscreen", "ignore") == "ignore" else 1)
+            self.fs_box.currentIndexChanged.connect(
+                lambda i: app.set_setting("capture_fullscreen", self.fs_box.itemData(i)))
+            frow.addWidget(self.fs_box)
+            frow.addStretch(1)
+            v.addLayout(frow)
+            v.addWidget(self._hint("In the capture box: Enter adds and closes, Shift+Enter adds and stays open, "
+                                   "Esc closes. Tab picks a list, or type #listname. Paste several lines to add "
+                                   "them all; paste text starting with “## Name” to make a new list."))
+            info = QFrame()
+            info.setObjectName("InfoBox")
+            ib = QVBoxLayout(info)
+            ib.setContentsMargins(12, 10, 12, 10)
+            text = QLabel(
+                "<b>Using a Stream Deck</b><br>"
+                "1. In the Stream Deck app, drag a <b>Hotkey</b> action (under System) onto a key.<br>"
+                "2. Click its Hotkey box and press the shortcut from above. Keys like F13 to F16 "
+                "aren't on most keyboards, so they can't clash with other programs' shortcuts. Pick them "
+                "from the Stream Deck's own key list if your keyboard has no F13.<br>"
+                "3. Do the same for the other actions. For a one-press capture of the same phrase, add a "
+                "<b>Text</b> action after the quick capture hotkey.<br>"
+                "Tick and timer act on the checklist whose timer is running, otherwise on the list you "
+                "used last.")
+            text.setWordWrap(True)
+            text.setTextFormat(Qt.TextFormat.RichText)
+            ib.addWidget(text)
+            v.addWidget(info)
+            v.addStretch(1)
+            self.sync_hotkey_status()
+
+        # ---- Backup (and templates, import & export)
+        v = self._page("backup", "Backup")
         v.addWidget(self._section("BACKUP"))
         v.addWidget(self._check("Auto-backup to plain-text files", "backup"))
         v.addWidget(self._field_label("Backup folder (pick one inside OneDrive or Google Drive to sync it)"))
@@ -192,19 +352,18 @@ class SettingsDialog(QDialog):
         v.addWidget(self.last_label)
         self.update_last()
 
-        # ---- templates
-        v.addWidget(self._section("CHECKLIST TEMPLATES"))
-        v.addWidget(self._hint("Save a checklist as a template from its tab's right-click menu, then start "
-                               "new ones from + ▾ > New from template. Templates are plain text files you "
-                               "can share."))
-        v.addWidget(self._field_label("Templates folder"))
         self.tpl_folder = QLineEdit(str(app.templates_dir()))
-        self.tpl_folder.setReadOnly(True)
-        v.addWidget(self.tpl_folder)
-        v.addLayout(self._buttons([("Change folder…", self._change_templates),
-                                   ("Open folder", self._open_templates)]))
+        if modes.has(mode, "templates"):
+            v.addWidget(self._section("CHECKLIST TEMPLATES"))
+            v.addWidget(self._hint("Save a checklist as a template from its tab's right-click menu, then start "
+                                   "new ones from + ▾ > New from template. Templates are plain text files you "
+                                   "can share."))
+            v.addWidget(self._field_label("Templates folder"))
+            self.tpl_folder.setReadOnly(True)
+            v.addWidget(self.tpl_folder)
+            v.addLayout(self._buttons([("Change folder…", self._change_templates),
+                                       ("Open folder", self._open_templates)]))
 
-        # ---- import / export
         v.addWidget(self._section("IMPORT & EXPORT"))
         v.addWidget(self._hint("Import adds lists from a text file or a spreadsheet saved as CSV, each as a "
                                "new tab. Export saves one list as a file that can be imported again, here "
@@ -222,64 +381,22 @@ class SettingsDialog(QDialog):
         v.addLayout(exp)
         v.addLayout(self._buttons([("Save example files…", lambda: app.save_examples(self))]))
         v.addWidget(self._hint("Example files show every format Docket reads, including checklists and colours."))
+        v.addStretch(1)
 
-        # ---- keyboard shortcuts
-        v.addWidget(self._section("KEYBOARD SHORTCUTS"))
-        v.addWidget(self._hint("These work from any program. Click a box and press the keys you want; "
-                               "Backspace clears it."))
-        self.key_edits: dict[str, QKeySequenceEdit] = {}
-        self.key_status: dict[str, QLabel] = {}
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(4)
-        for row, (key, label) in enumerate((("hotkey_show", "Show or hide Docket"),
-                                            ("hotkey_tick", "Tick the top item"),
-                                            ("hotkey_timer", "Start or pause the timer"))):
-            grid.addWidget(QLabel(label), row * 2, 0)
-            edit = QKeySequenceEdit(QKeySequence(s.get(key, ""), QKeySequence.SequenceFormat.PortableText))
-            if hasattr(edit, "setMaximumSequenceLength"):
-                edit.setMaximumSequenceLength(1)
-            if hasattr(edit, "setClearButtonEnabled"):
-                edit.setClearButtonEnabled(True)
-            edit.editingFinished.connect(lambda k=key, e=edit: self._save_key(k, e))
-            edit.keySequenceChanged.connect(lambda seq, k=key, e=edit: seq.isEmpty() and self._save_key(k, e))
-            grid.addWidget(edit, row * 2, 1)
-            status = QLabel()
-            status.setObjectName("Hint")
-            status.setWordWrap(True)
-            grid.addWidget(status, row * 2 + 1, 1)
-            self.key_edits[key] = edit
-            self.key_status[key] = status
-        grid.setColumnStretch(1, 1)
-        v.addLayout(grid)
-        v.addLayout(self._buttons([("Reset to F13, F14, F15", self._reset_keys)]))
-        info = QFrame()
-        info.setObjectName("InfoBox")
-        ib = QVBoxLayout(info)
-        ib.setContentsMargins(12, 10, 12, 10)
-        text = QLabel(
-            "<b>Using a Stream Deck</b><br>"
-            "1. In the Stream Deck app, drag a <b>Hotkey</b> action (under System) onto a key.<br>"
-            "2. Click its Hotkey box and press the shortcut from above. Keys like F13, F14 and F15 "
-            "aren't on most keyboards, so they can't clash with other programs' shortcuts. Type them "
-            "with the Stream Deck's own key list if your keyboard has no F13.<br>"
-            "3. Do the same for the other two actions.<br>"
-            "Tick and timer act on the checklist whose timer is running, otherwise on the list you "
-            "used last.")
-        text.setWordWrap(True)
-        text.setTextFormat(Qt.TextFormat.RichText)
-        ib.addWidget(text)
-        v.addWidget(info)
-        self.sync_hotkey_status()
-
-        # ---- about & updates
+        # ---- About & updates (and companion apps)
+        v = self._page("about", "About")
         v.addWidget(self._section("ABOUT & UPDATES"))
-        v.addWidget(QLabel(f"Docket {__version__}"))
+        v.addWidget(QLabel(f"Docket {__version__} · {modes.LABELS[mode]} mode"))
         v.addWidget(self._check("Check for updates once a day", "auto_update"))
         v.addLayout(self._buttons([("Check for updates", lambda: app.check_for_updates(True, self)),
                                    ("Release page", self._open_releases)]))
         self.update_status = self._hint("")
         v.addWidget(self.update_status)
+        from .. import companions as _comps
+        if _comps.for_mode(mode):
+            v.addWidget(self._section("COMPANION APPS"))
+            v.addWidget(self._hint("Free apps that work alongside Docket."))
+            v.addLayout(self._buttons([("Companion apps…", app.show_companions)]))
         v.addLayout(self._buttons([("Third-party notices", self._open_notices)]))
         v.addStretch(1)
 
@@ -291,6 +408,49 @@ class SettingsDialog(QDialog):
         bottom.addStretch(1)
         bottom.addWidget(close)
         outer.addLayout(bottom)
+        if tab in self.tab_keys:
+            self.tabs.setCurrentIndex(self.tab_keys.index(tab))
+
+    def _page(self, key: str, title: str) -> QVBoxLayout:
+        """A tab with its own scroll area; returns the layout to fill."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body = QWidget()
+        body.setObjectName("SettingsBody")
+        v = QVBoxLayout(body)
+        v.setContentsMargins(18, 12, 18, 18)
+        v.setSpacing(8)
+        scroll.setWidget(body)
+        self.tabs.addTab(scroll, title)
+        self.tab_keys.append(key)
+        return v
+
+    def current_tab_key(self) -> str:
+        i = self.tabs.currentIndex()
+        return self.tab_keys[i] if 0 <= i < len(self.tab_keys) else ""
+
+    def _fill_target_lists(self) -> None:
+        self.target_list.clear()
+        for t in self.app.store.tabs():
+            self.target_list.addItem(t.name, t.id)
+        i = self.target_list.findData(self.app.settings.get("capture_list"))
+        self.target_list.setCurrentIndex(max(0, i))
+
+    def _target_changed(self, i: int) -> None:
+        value = self.target_box.itemData(i)
+        self.app.set_setting("capture_target", value)
+        self.target_list.setVisible(value == "list")
+        if value == "list" and not self.app.settings.get("capture_list") and self.target_list.count():
+            self.app.set_setting("capture_list", self.target_list.itemData(self.target_list.currentIndex()))
+
+    def _clear_older(self) -> None:
+        n, unit = self.clear_n.value(), self.clear_unit.currentData()
+        self.app.set_setting("clear_logs_n", n)
+        self.app.set_setting("clear_logs_unit", unit)
+        from .. import timelogs
+        self.app.clear_time_logs(n * timelogs.UNITS[unit], self, f"{n} {unit if n != 1 else unit[:-1]}")
 
     # ---- helpers --------------------------------------------------------------------
     @staticmethod
@@ -406,6 +566,8 @@ class SettingsDialog(QDialog):
         self.update_last()
 
     def refresh_export_choices(self) -> None:
+        if hasattr(self, "target_list"):
+            self._fill_target_lists()
         current = self.export_box.currentData()
         self.export_box.clear()
         for tab in self.app.store.tabs():
@@ -431,7 +593,8 @@ class SettingsDialog(QDialog):
         self.sync_hotkey_status()
 
     def _reset_keys(self) -> None:
-        for key, default in (("hotkey_show", "F13"), ("hotkey_tick", "F14"), ("hotkey_timer", "F15")):
+        for key, default in (("hotkey_capture", "F16"), ("hotkey_show", "F13"), ("hotkey_tick", "F14"),
+                             ("hotkey_timer", "F15")):
             self.key_edits[key].setKeySequence(QKeySequence(default))
             self.app.set_setting(key, default)
         self.sync_hotkey_status()

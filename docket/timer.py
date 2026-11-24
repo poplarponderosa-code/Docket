@@ -28,9 +28,25 @@ def to_iso(t: dt.datetime) -> str:
     return t.strftime(ISO)
 
 
+def cap_first(text: str) -> str:
+    """'obtain heightmap' -> 'Obtain heightmap' (only the first letter changes)."""
+    text = text.strip()
+    return text[:1].upper() + text[1:] if text else text
+
+
+def to_precise(t: dt.datetime) -> str:
+    """Like to_iso but keeps milliseconds. Used for run_from, so a step's time isn't measured from
+    a start rounded down to the whole second (that added up to a second per step in 1.2.x)."""
+    return t.isoformat(timespec="milliseconds")
+
+
 def from_iso(s: str) -> dt.datetime | None:
     if not s:
         return None
+    try:
+        return dt.datetime.fromisoformat(s)
+    except ValueError:
+        pass
     try:
         return dt.datetime.strptime(s[:19], ISO)
     except ValueError:
@@ -120,7 +136,7 @@ class TimerEngine:
     # -- changing --------------------------------------------------------------------------
     def _begin(self, tab: Tab, item: Item, now: dt.datetime) -> None:
         stamp = to_iso(now)
-        self.store.update_item(item.id, quiet=True, run_from=stamp, started=item.started or stamp)
+        self.store.update_item(item.id, quiet=True, run_from=to_precise(now), started=item.started or stamp)
         self.store.update_tab(tab.id, quiet=True, timer_running=True, timer_started=tab.timer_started or stamp,
                               timer_finished="", heartbeat=stamp, current_item=item.id)
 
@@ -269,8 +285,8 @@ class TimerEngine:
                 end_text = end.strftime("%Y-%m-%d %H:%M:%S") if end else ""
             start = from_iso(it.started)
             rows.append({
-                "step": it.name,
-                "category": it.category,
+                "step": cap_first(it.name),
+                "category": cap_first(it.category),
                 "start": start.strftime("%Y-%m-%d %H:%M:%S") if start else "",
                 "end": end_text,
                 "seconds": round(self.live_elapsed(it, at)),
@@ -288,6 +304,10 @@ class TimerEngine:
         finished = from_iso(tab.timer_finished)
         lines = ["# Docket time log",
                  f"Checklist: {tab.name}"]
+        if tab.client.strip():
+            lines.append(f"Client: {tab.client.strip()}")
+        if tab.template.strip():
+            lines.append(f"Template: {tab.template.strip()}")
         if tab.description.strip():
             desc = tab.description.strip().splitlines()
             lines.append(f"Description: {desc[0]}")
@@ -339,14 +359,17 @@ class TimerEngine:
         rows = self.log_rows(tab_id, at)
         out = io.StringIO()
         w = csv.writer(out, lineterminator="\r\n")
-        w.writerow(["Checklist", "Step", "Category", "Start", "End", "Duration", "Minutes", "Limit", "Done"])
+        client, template = tab.client.strip(), tab.template.strip()
+        w.writerow(["Checklist", "Step", "Category", "Start", "End", "Duration", "Minutes", "Limit", "Done",
+                    "Client", "Template"])
         for r in rows:
             w.writerow([tab.name, r["step"], r["category"], r["start"], r["end"],
                         fmt_duration(r["seconds"]) if r["seconds"] or r["start"] else "",
                         round(r["seconds"] / 60, 2) if r["seconds"] else "",
-                        fmt_duration(r["limit"]) if r["limit"] else "", "yes" if r["done"] else "no"])
+                        fmt_duration(r["limit"]) if r["limit"] else "", "yes" if r["done"] else "no",
+                        client, template])
         total = sum(r["seconds"] for r in rows)
         w.writerow([tab.name, "Total", "", tab.timer_started.replace("T", " "), tab.timer_finished.replace("T", " "),
                     fmt_duration(total), round(total / 60, 2),
-                    fmt_duration(tab.time_limit) if tab.time_limit else "", ""])
+                    fmt_duration(tab.time_limit) if tab.time_limit else "", "", client, template])
         return out.getvalue()

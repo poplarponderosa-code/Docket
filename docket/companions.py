@@ -8,7 +8,11 @@ How a companion fits in (Ledger implements its side of this):
   A companion reads it whenever it starts, so it always looks in the right folder.
 * When Docket opens a companion it passes   --folder "<time logs folder>"
   and, for one checklist's log,             --open "<path to the .csv time log>".
-To add another companion later, add one line to COMPANIONS.
+To add another companion later, add one entry to COMPANIONS.
+
+First-run setup and Settings only list a companion once its repo has a published
+release (GitHub's /releases/latest skips drafts and pre-releases, so test builds
+can go out as pre-releases without showing up in Docket).
 """
 from __future__ import annotations
 
@@ -30,16 +34,51 @@ class Companion:
     exe: str
     repo: str            # owner/name on GitHub
     folders: tuple[str, ...]
+    mode: str = "pro"    # the lowest mode it suits: "basic", "advanced" or "pro"
+    description: str = ""
+    features: tuple[str, ...] = ()
 
     @property
     def releases_url(self) -> str:
         return f"https://github.com/{self.repo}/releases/latest"
 
+    @property
+    def api_latest(self) -> str:
+        return f"https://api.github.com/repos/{self.repo}/releases/latest"
+
 
 COMPANIONS: tuple[Companion, ...] = (
     Companion("ledger", "Ledger", "Docket Ledger", "DocketLedger.exe", "poplarponderosa-code/Docket-Ledger",
-              ("Docket Ledger", "Ledger")),
+              ("Docket Ledger", "Ledger"), "pro",
+              "Turns your checklist time logs into timesheet and invoice PDFs.",
+              ("Timesheets from Docket's time logs, with totals by category",
+               "Invoices with your letterhead, clients and rates",
+               "Client details stay in Ledger, on your PC")),
 )
+
+MODES = ("basic", "advanced", "pro")
+
+
+def for_mode(mode: str) -> list[Companion]:
+    """Companions that fit a mode: a mode includes everything from the ones before it."""
+    rank = MODES.index(mode) if mode in MODES else len(MODES) - 1
+    return [c for c in COMPANIONS if MODES.index(c.mode if c.mode in MODES else "pro") <= rank]
+
+
+def suits_exactly(mode: str) -> list[Companion]:
+    """Companions first unlocked by this mode (shown under that mode on the first-run page)."""
+    return [c for c in COMPANIONS if c.mode == mode]
+
+
+def run_installer(path: Path) -> bool:
+    """Run a companion's downloaded installer normally, so the person sees it."""
+    if sys.platform != "win32":
+        return False
+    try:
+        os.startfile(str(path))          # noqa: S606 - the installer the person asked for
+    except OSError:
+        return False
+    return True
 
 
 def get(key: str) -> Companion | None:

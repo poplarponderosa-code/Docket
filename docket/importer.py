@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .backup import description_lines, format_header, parse_categories, parse_header
 from .timer import fmt_limit, parse_duration
-from .parser import PRIORITY_WORDS, parse_date_expr, parse_quick_add, parse_single, parse_time
+from .parser import PRIORITY_WORDS, parse_date_expr, parse_quick_add, parse_single, parse_time, take_link
 from .store import PRIORITIES, Item, Tab
 
 CHECK_RE = re.compile(r"^(?:[-*•]\s*)?\[( |x|X|✓)\]\s*")
@@ -23,7 +23,8 @@ TRUE_WORDS = {"x", "yes", "y", "true", "1", "done", "✓", "complete", "complete
 
 def _new_item(name: str = "") -> dict:
     return {"name": name, "due": "", "end": "", "priority": 1, "notes": "",
-            "reminder": False, "remind_time": "", "done": False, "time_limit": 0, "category": ""}
+            "reminder": False, "remind_time": "", "done": False, "time_limit": 0, "category": "",
+            "link": ""}
 
 
 def _priority(word: str) -> int | None:
@@ -58,7 +59,9 @@ def parse_line(line: str, today: dt.date, checklist: bool = False) -> dict | Non
         return None
 
     if checklist and "|" not in s:
-        item = _new_item(s)          # checklist steps are taken as written: no dates
+        s, link = take_link(s)       # checklist steps are taken as written: no dates
+        item = _new_item(s or link)
+        item["link"] = link
         item["done"] = done
         return item
     if "|" in s:
@@ -74,6 +77,8 @@ def parse_line(line: str, today: dt.date, checklist: bool = False) -> dict | Non
                 item["time_limit"] = parse_duration(field[5:].lstrip(":").strip()) or 0
             elif low.startswith("category"):
                 item["category"] = field[8:].lstrip(":").strip()
+            elif low.startswith("link"):
+                item["link"] = field[4:].lstrip(":").strip()
             elif low.startswith("priority:"):
                 pri = _priority(field[9:])
                 if pri is not None:
@@ -107,6 +112,7 @@ def parse_line(line: str, today: dt.date, checklist: bool = False) -> dict | Non
         if q.remind_time:
             item["reminder"] = True
             item["remind_time"] = q.remind_time
+        item["link"] = q.link
     item["done"] = done
     return item
 
@@ -237,11 +243,14 @@ def load(path: Path, today: dt.date | None = None) -> list[dict]:
     return parse_text(text, name, today)
 
 
-def export_list(tab: Tab, items: list[Item]) -> str:
-    """One list in the import format, so it can be imported again (here or on another PC)."""
+def export_list(tab: Tab, items: list[Item], comments: bool = True, include_client: bool = True) -> str:
+    """One list in the import format, so it can be imported again (here or on another PC).
+
+    Copy list uses comments=False and leaves the client label out unless asked."""
     lines = [f"# Docket list export: {tab.name}",
              f"# Saved {dt.datetime.now():%Y-%m-%d %H:%M}. Import it with Settings > Import a list…",
-             "", format_header(tab)] + description_lines(tab)
+             ""] if comments else []
+    lines += [format_header(tab, include_client)] + description_lines(tab)
     for it in items:
         parts = [("[x] " if it.done else "") + it.name.replace("|", "/")]
         if tab.kind != "checklist" or it.due:
@@ -254,6 +263,8 @@ def export_list(tab: Tab, items: list[Item]) -> str:
             parts.append(f"limit {fmt_limit(it.time_limit)}")
         if it.category:
             parts.append(f"category {it.category.replace('|', '/')}")
+        if it.link:
+            parts.append(f"link {it.link.replace(' | ', ' / ')}")
         lines.append(" | ".join(parts) if len(parts) > 1 else parts[0])
         for note in it.notes.splitlines():
             lines.append("    " + note)
@@ -274,10 +285,17 @@ def template_text(tab: Tab, items: list[Item]) -> str:
             parts.append(f"limit {fmt_limit(it.time_limit)}")
         if it.category:
             parts.append(f"category {it.category.replace('|', '/')}")
+        if it.link:
+            parts.append(f"link {it.link.replace(' | ', ' / ')}")
         lines.append(" | ".join(parts))
         for note in it.notes.splitlines():
             lines.append("    " + note)
     return "\n".join(lines) + "\n"
+
+
+def plain_text(items: list[Item]) -> str:
+    """Copy as plain text: one item per line, for emails and notes."""
+    return "\n".join(it.name for it in items) + ("\n" if items else "")
 
 
 def safe_filename(name: str) -> str:
@@ -299,6 +317,8 @@ def load_template(path: Path) -> dict | None:
         return None
     tab = tabs[0]
     tab["kind"] = "checklist"
+    tab["client"] = ""                     # templates never carry a client
+    tab["template"] = tab.get("template") or (tab.get("name") or path.stem)
     for it in tab["items"]:
         it["done"] = False
     return tab
@@ -316,6 +336,8 @@ TEMPLATE_TXT = """\
 # For a checklist with its timer on, add "timer" and/or a total time: [checklist, teal, timer, limit 3h]
 # Lines starting with "> " right under the name line are the list's description.
 # A step's time limit goes after a " | ": Paint terrain | limit 45m
+# A link (web address, folder or file) for an item: Map files | link C:\\Maps\\River Valley
+#   (in the simple style a web address is picked up on its own: check https://example.com fri)
 # Checklist categories: a line "@categories: Terrain; Roads; Assets" under the name line,
 #   and a step's category after a " | ": Paint terrain | limit 45m | category Terrain
 #

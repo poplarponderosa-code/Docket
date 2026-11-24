@@ -48,7 +48,7 @@ def test_run_tick_advance_finish():
     assert round(eng.live_elapsed(s.item(a.id))) == 600
     assert eng.set_done(a.id, True) is False              # next step starts straight away
     assert s.item(a.id).elapsed == 600 and s.item(a.id).finished == "2026-11-21T14:10:00"
-    assert s.item(b.id).run_from == "2026-11-21T14:10:00"
+    assert s.item(b.id).run_from.startswith("2026-11-21T14:10:00")
     clock.add(minutes=5)
     eng.pause(t.id)
     clock.add(minutes=30)                                 # paused: not counted
@@ -67,7 +67,7 @@ def test_run_tick_advance_finish():
     assert "Heightmap | 2026-11-21 14:00:00 | 2026-11-21 14:10:00 | 10:00 | -" in text
     assert "Total time: 20:00" in text
     csv_text = eng.log_csv(t.id)
-    assert csv_text.splitlines()[0] == "Checklist,Step,Category,Start,End,Duration,Minutes,Limit,Done"
+    assert csv_text.splitlines()[0] == "Checklist,Step,Category,Start,End,Duration,Minutes,Limit,Done,Client,Template"
     assert "Map making,Roads,,2026-11-21 14:47:00,2026-11-21 14:50:00,3:00,3.0,,yes" in csv_text
     assert "By category" not in text                      # only when steps have categories
 
@@ -154,3 +154,22 @@ def test_categories_in_time_log():
     assert "Heightmap | Terrain | 2026-11-21 14:00:00" in text
     assert "By category | Duration" in text and "Terrain | 15:00" in text and "Roads | 20:00" in text
     assert "Map making,Roads,Roads,2026-11-21 14:15:00" in eng.log_csv(t.id)
+
+
+def test_steps_add_up_to_wall_clock_with_fractional_seconds(tmp_path):
+    """1.2.x stamped each step's start rounded down to the second, so every step gained up to 1s."""
+    import datetime as dt
+    from docket.store import Store
+    from docket.timer import TimerEngine
+    store = Store(tmp_path / "t.db")
+    tab = store.add_tab("Map", kind="checklist")
+    store.update_tab(tab.id, timer_on=True)
+    ids = [store.add_item(tab.id, f"step {n}").id for n in range(15)]
+    clock = [dt.datetime(2026, 11, 23, 6, 3, 17, 900000)]
+    eng = TimerEngine(store, now=lambda: clock[0])
+    eng.start(tab.id)
+    for i in ids:
+        clock[0] += dt.timedelta(seconds=6, milliseconds=530)
+        eng.set_done(i, True)
+    wall = 15 * 6.53
+    assert abs(eng.total_elapsed(tab.id) - wall) < 0.01
