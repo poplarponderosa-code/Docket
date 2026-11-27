@@ -4,6 +4,25 @@ A small, quiet to-do window for Windows 11: lists as tabs, each either a priorit
 (due date, item, priority, notes) or a checklist (steps in order), soft colour themes,
 reminders, and plain-text backups you can keep in OneDrive or Google Drive.
 
+## New in 1.4.3
+
+* Fixed: a pill showing 2 or 3 items couldn't be dragged back down to 1.
+* Fixed: Docket could crash when a popped-out list was put back in the main window.
+* Settings > About > Troubleshooting: **Copy diagnostic log** and **Open log folder**. If Docket
+  closed unexpectedly last time, it offers to copy the details on the next start. The log shows what
+  Docket was doing and any errors, not your lists, and stays on your PC.
+
+## New in 1.4.2
+
+* Quick capture asks "Add 21 items to …?" inside its own window instead of a popup that could open
+  behind it. The question flashes; Enter or Y adds them, Esc or N doesn't.
+
+## New in 1.4.1
+
+* Tour fixes: cards fit their text (nothing cut off), can be dragged out of the way, and the outline
+  follows the window; if you shrink Docket to a pill during the tour, Next brings the window back.
+  Clearer wording for quick capture (the key can be changed), client labels (mainly for Ledger) and AI.
+
 ## New in 1.4.0
 
 * **A short tour** of where things are, the first time Docket opens (existing users get an invitation

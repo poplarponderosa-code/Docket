@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QAbstractScrollArea, QAbstractSpinBox, QApplicati
                                QProgressDialog,
                                QMenu, QMessageBox, QSystemTrayIcon, QWidget)
 
-from . import __version__, backup, capture, companions, dates, importer, modes, system, themes, timelogs, tour, updates
+from . import __version__, backup, capture, companions, dates, diagnostics, importer, modes, system, themes, timelogs, tour, updates
 from .store import Store
 from .timer import TimerEngine, fmt_duration
 from .ui.icons import app_icon, dot_icon, refresh_icons
@@ -93,6 +93,15 @@ DEFAULTS = {
     "ai_phrase": "put it on the Docket", "ai_phrase_custom": "", "ai_copied_version": 0,
     "tour_done": False, "tour_seen_mode": "", "tips_on": True, "tips_seen": [],
 }
+
+
+def _alive(obj) -> bool:
+    """False once Qt has deleted the C++ side of a widget."""
+    try:
+        import shiboken6
+        return shiboken6.isValid(obj)
+    except Exception:
+        return obj is not None
 
 
 def data_dir() -> Path:
@@ -389,6 +398,26 @@ class DocketApp(QObject):
             old.deleteLater()
             QTimer.singleShot(0, lambda: self.open_settings(tab))
 
+    # ---- diagnostics ------------------------------------------------------------------------------
+    def copy_diagnostics(self) -> None:
+        QApplication.clipboard().setText(f"Docket {__version__}\n\n" + diagnostics.report(data_dir()))
+        self.flash("Diagnostic log copied. Paste it into a chat or an email.")
+
+    def open_log_folder(self) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(data_dir())))
+
+    def offer_crash_report(self) -> None:
+        box = QMessageBox(self.main if self.main.isVisible() else None)
+        box.setWindowTitle("Docket")
+        box.setText("Docket closed unexpectedly last time.")
+        box.setInformativeText("To report it, copy the details and paste them into a chat or an email. "
+                               "They show what Docket was doing, not your lists.")
+        copy = box.addButton("Copy details", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is copy:
+            self.copy_diagnostics()
+
     # ---- tour and tips ---------------------------------------------------------------------------------
     def tour_keys(self) -> dict:
         s = self.settings
@@ -635,13 +664,36 @@ class DocketApp(QObject):
         return w
 
     def _close_popout(self, tab_id: int) -> None:
+        """Close a pop-out window for good, safely.
+
+        This is often called from inside the pop-out itself (its dock button, its close button, a tab
+        dropped back on the main window). Closing and deleting it right there pulled the window out from
+        under the code still running in it, and Docket crashed (1.4.3 and earlier). So: hide it now,
+        close and delete it once the current event has finished, and keep a reference until Qt has
+        actually deleted it (dropping the last reference early also deleted its hidden owner window,
+        and the pop-out with it)."""
         w = self.popouts.pop(tab_id, None)
-        if w is not None:
-            w.closing_for_good = True
-            w.close()
-            w.deleteLater()
+        if w is None:
+            return
+        diagnostics.note(f"pop-out {tab_id} closing")
+        w.closing_for_good = True
+        try:
+            w.page.flush()
+        except Exception:
+            pass
+        w.hide()
+        self._retired = [r for r in getattr(self, "_retired", []) if _alive(r)]
+        self._retired.append(w)
+        QTimer.singleShot(0, lambda: self._finish_close(w))
+
+    def _finish_close(self, w) -> None:
+        if not _alive(w):
+            return
+        w.close()
+        w.deleteLater()
 
     def pop_out(self, tab_id: int) -> PopoutWindow:
+        diagnostics.note(f"pop out list {tab_id}")
         if tab_id in self.popouts:
             self.popouts[tab_id].raise_()
             return self.popouts[tab_id]
@@ -655,6 +707,7 @@ class DocketApp(QObject):
 
     def tear_off(self, tab_id: int, gpos: QPoint) -> None:
         """A tab was dragged out of the bar: give it a window that follows the mouse."""
+        diagnostics.note(f"tab {tab_id} dragged out")
         w = self.pop_out(tab_id)
         if w.collapsed:
             w.toggle_collapse()
@@ -663,6 +716,7 @@ class DocketApp(QObject):
         w.title.begin_manual_drag(offset)
 
     def dock(self, tab_id: int, index: int | None = None) -> None:
+        diagnostics.note(f"put list {tab_id} back in the main window" + (f" at {index}" if index is not None else ""))
         if tab_id not in self.popouts and not (self.store.tab(tab_id) and self.store.tab(tab_id).popped):
             return
         self.store.set_tab_popped(tab_id, False)
@@ -1757,6 +1811,7 @@ class DocketApp(QObject):
             self.capture_window.hide()
             self.capture_window.toast.hide()
         self._save_before_exit()
+        diagnostics.clean_exit()
         self.tray.hide()
         self.store.close()
 
@@ -1811,7 +1866,12 @@ def main() -> int:
     server = QLocalServer()
     server.listen(SERVER_NAME)
 
+    # Only the copy that keeps running logs (a second launch above just hands over and exits).
+    crashed_last_time = diagnostics.previous_session_crashed(data_dir())
+    diagnostics.start(data_dir(), __version__)
     app = DocketApp(qapp, sys.argv)
+    if crashed_last_time:
+        QTimer.singleShot(1500, app.offer_crash_report)
 
     def on_connection() -> None:
         conn = server.nextPendingConnection()

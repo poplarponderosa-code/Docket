@@ -13,10 +13,10 @@ from PySide6.QtCore import QByteArray, QEvent, QObject, QPoint, QRect, QRectF, Q
 from PySide6.QtGui import (QCloseEvent, QColor, QFont, QGuiApplication, QIcon, QKeyEvent, QMouseEvent, QPainter,
                            QPainterPath)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
-                               QPushButton, QSizeGrip, QStackedWidget, QStyle, QStyleOptionTab, QStylePainter,
+                               QPushButton, QSizeGrip, QSizePolicy, QStackedWidget, QStyle, QStyleOptionTab, QStylePainter,
                                QTabBar, QToolButton, QVBoxLayout, QWidget)
 
-from .. import dates, links, themes
+from .. import dates, diagnostics, links, themes
 from ..geometry import snap, touching_group
 from ..store import Item
 from .common import (SIDE_EDGES, WM_NCLBUTTONDBLCLK, ClickableWidget, ElideLabel, TitleBar, edge_hit_test,
@@ -186,6 +186,11 @@ class DocketWindow(QWidget):
         self.pill_list.setObjectName("PillList")
         self.pill_list.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._pill_lay = QVBoxLayout(self.pill_list)
+        # The extra item lines must not set a minimum height for the pill, or Windows won't let the
+        # bottom edge be dragged back up from 3 items to 1. The pill's height decides how many show.
+        self._pill_lay.setSizeConstraint(QVBoxLayout.SizeConstraint.SetNoConstraint)
+        self.pill_list.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
+        self.pill_list.setMinimumHeight(0)
         self._pill_lay.setContentsMargins(15, 0, 10, 6)
         self._pill_lay.setSpacing(0)
         self.pill_list.hide()
@@ -519,6 +524,7 @@ class DocketWindow(QWidget):
 
     # ---- pill mode ----------------------------------------------------------------------
     def toggle_collapse(self) -> None:
+        diagnostics.note(f"{type(self).__name__} {'expand from' if self.collapsed else 'shrink to'} pill")
         if not self.collapsed:
             QTimer.singleShot(500, lambda: self.app.tip("pill", self) if self.collapsed else None)
             self._full_size = self.size()

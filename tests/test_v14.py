@@ -64,3 +64,29 @@ def test_offer_and_tips():
     assert tour.tip_due({"tips_on": True, "tips_seen": []}, "panel")
     assert not tour.tip_due({"tips_on": True, "tips_seen": ["panel"]}, "panel")
     assert not tour.tip_due({"tips_on": False, "tips_seen": []}, "panel")
+
+
+def test_diagnostics_log_and_crash_detection(tmp_path):
+    from docket import diagnostics
+    assert not diagnostics.previous_session_crashed(tmp_path)
+    diagnostics.start(tmp_path, "9.9.9")
+    try:
+        diagnostics.note("pop out list 3")
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            import sys
+            diagnostics._excepthook(*sys.exc_info())
+        assert diagnostics.previous_session_crashed(tmp_path)      # an error and no clean exit
+        diagnostics.clean_exit()
+        assert not diagnostics.previous_session_crashed(tmp_path)
+        (tmp_path / "docket-crash.txt").open("a").write("Fatal Python error: Segmentation fault\n")
+        assert diagnostics.previous_session_crashed(tmp_path)
+        text = diagnostics.report(tmp_path)
+        assert "pop out list 3" in text and "ValueError: boom" in text and "Segmentation fault" in text
+    finally:
+        import faulthandler
+        faulthandler.disable()
+        import sys
+        sys.excepthook = sys.__excepthook__
+        diagnostics._log_path = None

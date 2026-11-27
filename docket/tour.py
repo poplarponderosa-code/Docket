@@ -27,18 +27,18 @@ STEPS = [
     Step("new_list", "basic", "add_tab", "New lists",
          "+ makes a new list. The arrow next to it has more choices, like importing a list from a file."),
     Step("add", "basic", "input", "Adding items",
-         "Type an item and press Enter. A date, time or priority at the end is picked up: "
-         "“dentist fri 3pm !high”. A web address becomes the item's link. Paste several lines to add "
-         "them all at once, and Ctrl+Enter adds to the other end of the list."),
+         "Type an item and press Enter. A date, time or priority at the end is picked up, like "
+         "“dentist fri 3pm !high”. Paste several lines to add them all."),
     Step("items", "basic", "list", "Your items",
          "Tick an item when it's done. Click its arrow for notes, dates, a reminder and a link; Enter or "
          "Esc closes it again. In a checklist, drag steps to change the order."),
     Step("pill", "basic", "collapse", "Pills",
-         "This shrinks the window to a pill that keeps the top item in view. A list in its own window can "
-         "be a pill too, so you can have one pill per list."),
+         "This shrinks the window to a pill that keeps the top item in view; the same button brings the "
+         "window back. A list in its own window can be a pill too."),
     Step("capture", "quick_capture", "", "Quick capture",
          "Press {capture_key} anywhere in Windows to add an item without opening Docket. Tab picks the "
-         "list, #listname sends one item somewhere else, and Shift+Enter keeps the box open for another."),
+         "list and Shift+Enter keeps the box open for another. You can change the key in Settings > "
+         "Shortcuts."),
     Step("shortcuts", "shortcuts", "settings", "Shortcuts",
          "{show_key} shows or hides Docket and {tick_key} ticks off the top item. Change the keys in "
          "Settings > Shortcuts; they work from a Stream Deck too."),
@@ -49,14 +49,14 @@ STEPS = [
          "Right-click a checklist's tab and choose Use a timer. Time runs on the top unticked step and "
          "ticking it starts the next. Click a step's time to give it a limit."),
     Step("categories", "categories", "tabs", "Categories and clients",
-         "A checklist's right-click menu also has Categories… and a Client label. Click a step's category "
-         "to change it. Client labels stay short, like “Acme”; their details stay in Ledger."),
+         "A checklist's right-click menu also has Categories… and a Client label. The client label is "
+         "mainly for Ledger, so it knows who to bill. Keep it short, like “Acme”."),
     Step("timelogs", "timelogs", "logo", "Time logs",
-         "When you tick a timed checklist's last step, Docket saves a time log. Open the folder from this "
-         "menu. Ledger turns logs into timesheets and invoices."),
+         "Ticking a timed checklist's last step saves a time log. Open the folder from this menu. Ledger "
+         "turns time logs into invoices."),
     Step("settings", "basic", "settings", "Settings",
-         "Modes, themes, backups and more. Settings > AI has instructions you can give your AI so it "
-         "writes lists ready to paste into Docket."),
+         "Modes, themes, backups and more. Settings > AI has instructions that teach an AI to write lists "
+         "you can paste into Docket. An AI can't see your lists unless you give it access to Docket's files."),
 ]
 
 WELCOME = Step("welcome", "basic", "", "Welcome to Docket",

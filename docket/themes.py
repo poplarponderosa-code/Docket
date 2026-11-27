@@ -179,6 +179,10 @@ QTabWidget#SettingsTabs QTabBar::tab:hover {{ color: {p['text']}; }}
 QToolButton#CaptureList {{ border: 1px solid {p['border']}; border-radius: 8px; padding: 5px 8px;
     background: {p['win']}; color: {p['text']}; }}
 QToolButton#CaptureList:hover {{ background: {p['hover']}; }}
+#CaptureAsk {{ background: {p['surface']}; border: 1px solid {p['accent']}; border-radius: 8px; }}
+#CaptureAsk[flash="true"] {{ background: {p['accent']}; }}
+#CaptureAsk[flash="true"] #CaptureAskText {{ color: {p['surface']}; }}
+#CaptureAskText {{ color: {p['text']}; font-weight: 600; }}
 #TourCard {{ background: {p['surface']}; border: 1px solid {p['accent']}; border-radius: 12px; }}
 #TourCount {{ color: {p['muted']}; font-size: 10px; font-weight: 600; letter-spacing: 1px; }}
 #TourTitle {{ color: {p['text']}; font-size: 14px; font-weight: 600; }}

@@ -278,7 +278,8 @@ class SettingsDialog(QDialog):
         self._refresh_ai_text()
         v.addWidget(self._hint("The instructions tell the AI to leave out client labels unless you typed one, "
                                "and to use your own category names. Nothing is sent anywhere by Docket: you "
-                               "copy and paste."))
+                               "copy and paste. An AI can't see your lists unless you give it access to "
+                               "Docket's files."))
         v.addStretch(1)
 
         # ---- Timer (Pro)
@@ -506,6 +507,12 @@ class SettingsDialog(QDialog):
             v.addWidget(self._section("COMPANION APPS"))
             v.addWidget(self._hint("Free apps that work alongside Docket."))
             v.addLayout(self._buttons([("Companion apps…", app.show_companions)]))
+        v.addWidget(self._section("TROUBLESHOOTING"))
+        v.addWidget(self._hint("If Docket misbehaves or closes unexpectedly, copy the diagnostic log and paste "
+                               "it into a chat or an email. It shows what Docket was doing and any errors, "
+                               "not your lists."))
+        v.addLayout(self._buttons([("Copy diagnostic log", app.copy_diagnostics),
+                                   ("Open log folder", app.open_log_folder)]))
         v.addLayout(self._buttons([("Third-party notices", self._open_notices)]))
         v.addStretch(1)
 

@@ -8,7 +8,7 @@
 ; For a new version: change MyAppVersion below (and __version__ in docket\__init__.py).
 
 #define MyAppName "Docket"
-#define MyAppVersion "1.4.0"
+#define MyAppVersion "1.4.3"
 #define MyAppPublisher "Docket"
 #define MyAppExeName "Docket.exe"
 

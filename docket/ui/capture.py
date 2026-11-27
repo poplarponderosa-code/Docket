@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPropertyAnimation, Qt, QTimer
 from PySide6.QtGui import QCursor, QGuiApplication
-from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMenu, QMessageBox,
+from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton,
                                QToolButton, QVBoxLayout)
 
 from .. import capture, dates, importer, links, system
@@ -44,6 +44,15 @@ class CaptureEdit(GrowEdit):
         return super().event(e)
 
     def keyPressEvent(self, e) -> None:
+        if self.win.pending is not None:
+            # A question is showing ("Add 21 items?"): Enter or Y says yes, Esc or N says no.
+            key = e.key()
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Y):
+                self.win.answer(True)
+            elif key in (Qt.Key.Key_Escape, Qt.Key.Key_N):
+                self.win.answer(False)
+            e.accept()
+            return
         if e.key() == Qt.Key.Key_Escape:
             self.win.cancel()
             return
@@ -122,6 +131,32 @@ class CaptureWindow(QFrame):
         prev.addWidget(self.link_icon)
         prev.addWidget(self.preview, 1)
         v.addLayout(prev)
+        # The question bar ("Add 21 items to Inbox?"), shown inside the window instead of a popup.
+        self.pending = None
+        self.ask_bar = QFrame()
+        self.ask_bar.setObjectName("CaptureAsk")
+        self.ask_bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        ask = QHBoxLayout(self.ask_bar)
+        ask.setContentsMargins(12, 6, 6, 6)
+        ask.setSpacing(6)
+        self.ask_text = QLabel()
+        self.ask_text.setObjectName("CaptureAskText")
+        ask.addWidget(self.ask_text, 1)
+        self.ask_yes = QPushButton("Yes")
+        self.ask_yes.setProperty("primary", True)
+        self.ask_yes.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.ask_yes.clicked.connect(lambda: self.answer(True))
+        ask.addWidget(self.ask_yes)
+        self.ask_no = QPushButton("No")
+        self.ask_no.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.ask_no.clicked.connect(lambda: self.answer(False))
+        ask.addWidget(self.ask_no)
+        self.ask_bar.hide()
+        v.addWidget(self.ask_bar)
+        self._flashes = 0
+        self._flash_timer = QTimer(self)
+        self._flash_timer.setInterval(180)
+        self._flash_timer.timeout.connect(self._flash_step)
         self.keys = QLabel("Enter adds · Shift+Enter adds another · Ctrl+Enter adds to the other end · "
                            "Tab picks the list · Esc closes")
         self.keys.setWordWrap(True)
@@ -173,6 +208,7 @@ class CaptureWindow(QFrame):
     # ---- showing -------------------------------------------------------------------------
     def open(self) -> None:
         self.target_id = None
+        self._clear_question()
         self.edit.clear()
         self._preview()
         screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
@@ -339,15 +375,45 @@ class CaptureWindow(QFrame):
         _, tab_id = self._target_for(self.edit.text().strip())     # #list typed before pasting, or Tab's pick
         where_name = self._target_name(tab_id)
         if len(lines) > PASTE_CONFIRM_OVER:
-            box = QMessageBox(self)
-            box.setWindowTitle("Quick capture")
-            box.setText(f"Add {len(lines)} items to {where_name}?")
-            box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
-            box.setDefaultButton(QMessageBox.StandardButton.Yes)
-            if box.exec() != QMessageBox.StandardButton.Yes:
-                self.activateWindow()
-                self.edit.setFocus()
-                return
+            self.ask(f"Add {len(lines)} items to {where_name}?", lines, tab_id)
+            return
+        self._add_pasted(lines, tab_id)
+
+    # ---- the question bar ------------------------------------------------------------------------
+    def ask(self, question: str, lines: list[str], tab_id: int) -> None:
+        self.pending = (lines, tab_id)
+        self.ask_text.setText(question + "   Enter = yes · Esc = no")
+        self.ask_bar.show()
+        self.adjustSize()
+        self._flashes = 6
+        self._flash_timer.start()
+        self.activateWindow()
+        self.edit.setFocus()
+
+    def _flash_step(self) -> None:
+        self._flashes -= 1
+        on = self._flashes % 2 == 1
+        self.ask_bar.setProperty("flash", on)
+        self.ask_bar.style().unpolish(self.ask_bar)
+        self.ask_bar.style().polish(self.ask_bar)
+        if self._flashes <= 0:
+            self._flash_timer.stop()
+
+    def _clear_question(self) -> None:
+        self.pending = None
+        self._flash_timer.stop()
+        self.ask_bar.setProperty("flash", False)
+        self.ask_bar.hide()
+        self.adjustSize()
+
+    def answer(self, yes: bool) -> None:
+        pending = self.pending
+        self._clear_question()
+        self.edit.setFocus()
+        if yes and pending is not None:
+            self._add_pasted(*pending)
+
+    def _add_pasted(self, lines: list[str], tab_id: int) -> None:
         where = None
         if self.app.new_items_on_top():
             lines = list(reversed(lines))        # added one by one to the top: keep the pasted order

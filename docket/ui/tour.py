@@ -14,7 +14,7 @@ from .common import round_corners
 if TYPE_CHECKING:
     from ..app import DocketApp
 
-CARD_W = 330
+CARD_W = 360
 GAP = 10
 
 
@@ -67,7 +67,12 @@ class Card(QFrame):
         self.text = QLabel()
         self.text.setObjectName("TourText")
         self.text.setWordWrap(True)
+        self.text.setTextFormat(Qt.TextFormat.PlainText)
         v.addWidget(self.text)
+        self.moved_by_user = False
+        self._drag_from = None
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.setToolTip("Drag to move")
         self.buttons = QHBoxLayout()
         self.buttons.setSpacing(6)
         v.addSpacing(4)
@@ -92,10 +97,42 @@ class Card(QFrame):
             return
         super().keyPressEvent(e)
 
+    # Drag the card anywhere by its background (e.g. off a pill it's covering).
+    def mousePressEvent(self, e) -> None:
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_from = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self.moved_by_user = True
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e) -> None:
+        start = getattr(self, "_drag_from", None)
+        if start is not None and e.buttons() & Qt.MouseButton.LeftButton:
+            self.move(e.globalPosition().toPoint() - start)
+            e.accept()
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e) -> None:
+        self._drag_from = None
+        super().mouseReleaseEvent(e)
+
+    def fit_height(self) -> int:
+        """Height that shows every line of the wrapped text, including letters like g and y."""
+        for lbl in (self.count, self.title, self.text):
+            lbl.ensurePolished()
+        self.ensurePolished()
+        lay = self.layout()
+        lay.activate()
+        h = lay.totalHeightForWidth(CARD_W) if lay.hasHeightForWidth() else lay.sizeHint().height()
+        h = max(int(h), self.sizeHint().height()) + 6
+        self.setFixedHeight(h)
+        return h
+
     def place_near(self, target: QRect | None, fallback: QRect) -> None:
         """Below the target if there's room, otherwise above, beside, or in the middle of fallback."""
-        self.adjustSize()
-        w, h = self.width(), self.sizeHint().height()
+        w, h = CARD_W, self.fit_height()
         anchor = target if target is not None else fallback
         screen = QGuiApplication.screenAt(anchor.center()) or QGuiApplication.primaryScreen()
         area = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
@@ -136,6 +173,11 @@ class Tour:
         self.card = Card(lambda: self.stop(False))
         self.highlight = Highlight()
         self._ended = False
+        # The window can change under the tour (shrunk to a pill, moved, resized): keep the outline on
+        # its target, or hide it when the target isn't showing.
+        self._follow = QTimer(self.card)
+        self._follow.setInterval(250)
+        self._follow.timeout.connect(self._follow_target)
 
     # ---- targets ------------------------------------------------------------------------------
     def _target(self, name: str) -> QWidget | None:
@@ -166,8 +208,31 @@ class Tour:
             main.toggle_collapse()
         QTimer.singleShot(150, self.show_step)
 
+    def _expand_main(self) -> bool:
+        """Bring the main window back from a pill (the tour points at its buttons). True if it changed."""
+        main = self.app.main
+        if getattr(main, "collapsed", False):
+            main.toggle_collapse()
+            return True
+        return False
+
+    def _follow_target(self) -> None:
+        if self._ended or not self.steps:
+            return
+        step = self.steps[self.index]
+        target = self._target(step.target) if step.target else None
+        if target is None or getattr(self.app.main, "collapsed", False):
+            self.highlight.hide()
+            return
+        rect = self._global_rect(target).adjusted(-5, -5, 5, 5)
+        if self.highlight.geometry() != rect or not self.highlight.isVisible():
+            self.highlight.cover(self._global_rect(target))
+
     def show_step(self) -> None:
         if self._ended or not self.steps:
+            return
+        if self._expand_main():
+            QTimer.singleShot(200, self.show_step)
             return
         step = self.steps[self.index]
         last = self.index == len(self.steps) - 1
@@ -201,6 +266,7 @@ class Tour:
         self.card.raise_()
         self.card.activateWindow()
         nxt.setFocus()
+        self._follow.start()
 
     def next(self) -> None:
         if self.index >= len(self.steps) - 1:
@@ -218,6 +284,7 @@ class Tour:
         if self._ended:
             return
         self._ended = True
+        self._follow.stop()
         self.card.hide()
         self.highlight.hide()
         self.card.deleteLater()
